@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: cts-constructconnect
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    autoDeployTrigger: commit
+    healthCheckPath: /
+    envVars:
+      - key: CTS_SECRET
+        generateValue: true
+      - key: CTS_HTTPS
+        value: "1"
+      - key: CTS_ADMIN_EMAIL
+        sync: false
+      - key: CTS_ADMIN_PASSWORD
+        sync: false
