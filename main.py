@@ -1,5 +1,6 @@
 
 import os, secrets, hashlib, hmac, time, json
+import requests
 import psycopg
 from psycopg.rows import dict_row
 from contextlib import contextmanager
@@ -12,6 +13,9 @@ from starlette.middleware.sessions import SessionMiddleware
 BASE=Path(__file__).resolve().parent
 DATABASE_URL=os.environ.get("DATABASE_URL","")
 SECRET=os.environ.get("CTS_SECRET","development-only-secret-change-me")
+RAZORPAY_KEY_ID=os.environ.get("RAZORPAY_KEY_ID","")
+RAZORPAY_KEY_SECRET=os.environ.get("RAZORPAY_KEY_SECRET","")
+MEMBERSHIP_AMOUNT_PAISE=2000000
 app=FastAPI(title="CTS ConstructConnect")
 app.add_middleware(SessionMiddleware,secret_key=SECRET,https_only=os.environ.get("CTS_HTTPS","0")=="1",same_site="lax",max_age=86400*7)
 CATS=["Cement","Steel & TMT","Hardware & Tools","M-Sand & Aggregates","Ready-Mix Concrete","Bricks & Blocks","Electrical","Plumbing & Sanitary","Paints & Chemicals","Tiles & Flooring","Construction Equipment","Crusher & Plant Spares","Equipment Rental","Contractors & Services","Manpower","Transport & Logistics","Real Estate","Tenders & Projects","Industrial Supplies","Safety Equipment"]
@@ -60,11 +64,15 @@ class Quote(BaseModel):
     requirement_id:int;amount:float=Field(gt=0,le=10000000000);notes:str=Field(default="",max_length=600)
 class Ad(BaseModel):
     headline:str=Field(min_length=4,max_length=150);category:str;target_city:str=Field(min_length=2,max_length=90);target_district:str=Field(default="",max_length=90)
+class PaymentVerify(BaseModel):
+    razorpay_order_id:str
+    razorpay_payment_id:str
+    razorpay_signature:str
 def me(request):
     uid=request.session.get("uid")
     if not uid:raise HTTPException(401,"Please log in")
     with conn() as c:
-        u=c.execute("SELECT id,email,name,role,city,district,pin,category,service_areas,approved FROM users WHERE id=%s",(uid,)).fetchone()
+        u=c.execute("SELECT id,email,name,role,city,district,pin,category,service_areas,approved,membership_until FROM users WHERE id=%s",(uid,)).fetchone()
     if not u:raise HTTPException(401,"Session expired")
     return dict(u)
 def role(request,r):
@@ -161,6 +169,44 @@ def create_ad(d:Ad,request:Request):
 def ads(city:str=""):
     with conn() as c:rows=[dict(x) for x in c.execute("SELECT a.id,a.headline,a.category,a.target_city,a.target_district,u.name supplier_name FROM ads a JOIN users u ON u.id=a.supplier_id WHERE a.approved=1 ORDER BY a.id DESC LIMIT 100")]
     return [x for x in rows if not city or city.casefold() in (x["target_city"]+" "+x["target_district"]).casefold()]
+@app.get("/api/membership")
+def membership(request:Request):
+    u=me(request)
+    return {"plan":"Verified Supplier Annual","amount_paise":MEMBERSHIP_AMOUNT_PAISE,"currency":"INR","membership_until":u["membership_until"],"configured":bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)}
+
+@app.post("/api/payments/order")
+def payment_order(request:Request):
+    u=role(request,"supplier")
+    if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
+        raise HTTPException(503,"Payment gateway setup is being completed")
+    receipt=f"cts-{u['id']}-{int(time.time())}"
+    try:
+        response=requests.post("https://api.razorpay.com/v1/orders",auth=(RAZORPAY_KEY_ID,RAZORPAY_KEY_SECRET),json={"amount":MEMBERSHIP_AMOUNT_PAISE,"currency":"INR","receipt":receipt},timeout=15)
+        response.raise_for_status()
+        order=response.json()
+    except Exception:
+        raise HTTPException(502,"Unable to create payment order")
+    with conn() as c:
+        c.execute("INSERT INTO payments(user_id,provider_order_id,amount_paise,currency,status,created) VALUES(%s,%s,%s,%s,%s,%s)",(u["id"],order["id"],MEMBERSHIP_AMOUNT_PAISE,"INR","created",int(time.time())))
+    return {"key":RAZORPAY_KEY_ID,"order_id":order["id"],"amount":MEMBERSHIP_AMOUNT_PAISE,"currency":"INR","name":"CTS ConstructConnect","description":"Verified Supplier Annual Membership","prefill":{"name":u["name"],"email":u["email"]}}
+
+@app.post("/api/payments/verify")
+def payment_verify(d:PaymentVerify,request:Request):
+    u=role(request,"supplier")
+    if not RAZORPAY_KEY_SECRET:
+        raise HTTPException(503,"Payment gateway setup is being completed")
+    expected=hmac.new(RAZORPAY_KEY_SECRET.encode(),f"{d.razorpay_order_id}|{d.razorpay_payment_id}".encode(),hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected,d.razorpay_signature):
+        raise HTTPException(400,"Payment verification failed")
+    now=int(time.time())
+    with conn() as c:
+        payment=c.execute("SELECT id,status FROM payments WHERE provider_order_id=%s AND user_id=%s",(d.razorpay_order_id,u["id"])).fetchone()
+        if not payment: raise HTTPException(404,"Payment order not found")
+        if payment["status"]!="paid":
+            c.execute("UPDATE payments SET provider_payment_id=%s,status='paid',paid_at=%s WHERE id=%s",(d.razorpay_payment_id,now,payment["id"]))
+            c.execute("UPDATE users SET membership_until=GREATEST(membership_until,%s)+%s WHERE id=%s",(now,365*86400,u["id"]))
+    return {"ok":True,"message":"Payment verified. Annual supplier membership is active."}
+
 @app.get("/api/admin")
 def admin(request:Request):
     role(request,"admin")
