@@ -1,5 +1,5 @@
 
-import os, secrets, hashlib, hmac, time, json
+import os, secrets, hashlib, hmac, time, json, base64
 import requests
 import psycopg
 from psycopg.rows import dict_row
@@ -79,6 +79,8 @@ class Requirement(BaseModel):
 class Quote(BaseModel):
     requirement_id:int;amount:float=Field(gt=0,le=10000000000);notes:str=Field(default="",max_length=600)
 class Ad(BaseModel):
+    image_base64:str=Field(default="",max_length=2800000)
+    image_type:str=Field(default="",max_length=30)
     headline:str=Field(min_length=4,max_length=150);category:str;target_city:str=Field(min_length=2,max_length=90);target_district:str=Field(default="",max_length=90)
 class PaymentVerify(BaseModel):
     razorpay_order_id:str
@@ -181,7 +183,13 @@ def quotes(reqid:int,request:Request):
 def create_ad(d:Ad,request:Request):
     u=role(request,"supplier")
     if d.category not in CATS:raise HTTPException(400,"Invalid category")
-    with conn() as c:c.execute("INSERT INTO ads(supplier_id,headline,category,target_city,target_district,created) VALUES(%s,%s,%s,%s,%s,%s)",(u["id"],d.headline,d.category,d.target_city,d.target_district,int(time.time())))
+    image=None
+    if d.image_base64:
+        try:image=base64.b64decode(d.image_base64,validate=True)
+        except Exception:raise HTTPException(400,"Invalid picture")
+        if len(image)>2*1024*1024:raise HTTPException(400,"Picture must be under 2 MB")
+        if not ((d.image_type=="image/jpeg" and image[:3]==bytes([255,216,255])) or (d.image_type=="image/png" and image[:8]==bytes([137,80,78,71,13,10,26,10]))):raise HTTPException(400,"Use JPG or PNG")
+    with conn() as c:c.execute("INSERT INTO ads(supplier_id,headline,category,target_city,target_district,created,image_data,image_type) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",(u["id"],d.headline,d.category,d.target_city,d.target_district,int(time.time()),image,d.image_type if image else None))
     return {"ok":True,"message":"Advertisement submitted for CTS approval"}
 @app.get("/api/ads")
 def ads(city:str=""):
@@ -239,3 +247,12 @@ def approve(kind:str,itemid:int,request:Request):
         if kind=="supplier":c.execute("UPDATE users SET approved=1 WHERE id=%s AND role='supplier'",(itemid,))
         else:c.execute("UPDATE ads SET approved=1 WHERE id=%s",(itemid,))
     return {"ok":True}
+
+@app.get("/api/ads/{adid}/picture")
+def ad_picture(adid:int,request:Request):
+    with conn() as c:a=c.execute("SELECT supplier_id,approved,image_data,image_type FROM ads WHERE id=%s",(adid,)).fetchone()
+    if not a or not a["image_data"]:raise HTTPException(404,"Picture not found")
+    if not a["approved"]:
+        u=me(request)
+        if u["role"]!="admin" and u["id"]!=a["supplier_id"]:raise HTTPException(403,"Awaiting approval")
+    return Response(bytes(a["image_data"]),media_type=a["image_type"],headers={"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"})
