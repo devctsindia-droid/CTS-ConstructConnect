@@ -1,5 +1,7 @@
 
-import os, sqlite3, secrets, hashlib, hmac, time, json
+import os, secrets, hashlib, hmac, time, json
+import psycopg
+from psycopg.rows import dict_row
 from contextlib import contextmanager
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -8,18 +10,25 @@ from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 
 BASE=Path(__file__).resolve().parent
-DB=Path(os.environ.get("CTS_DB",str(BASE/"cts.db")))
+DATABASE_URL=os.environ.get("DATABASE_URL","")
 SECRET=os.environ.get("CTS_SECRET","development-only-secret-change-me")
 app=FastAPI(title="CTS ConstructConnect")
 app.add_middleware(SessionMiddleware,secret_key=SECRET,https_only=os.environ.get("CTS_HTTPS","0")=="1",same_site="lax",max_age=86400*7)
 CATS=["Cement","Steel & TMT","Hardware & Tools","M-Sand & Aggregates","Ready-Mix Concrete","Bricks & Blocks","Electrical","Plumbing & Sanitary","Paints & Chemicals","Tiles & Flooring","Construction Equipment","Crusher & Plant Spares","Equipment Rental","Contractors & Services","Manpower","Transport & Logistics","Real Estate","Tenders & Projects","Industrial Supplies","Safety Equipment"]
 @contextmanager
 def conn():
-    DB.parent.mkdir(parents=True,exist_ok=True)
-    c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;c.execute("PRAGMA foreign_keys=ON")
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not configured")
+    c=psycopg.connect(DATABASE_URL,row_factory=dict_row)
+    c.execute("SET search_path TO cts_app")
     try:
-        yield c;c.commit()
-    finally:c.close()
+        yield c
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
 def pwdhash(p,salt=None):
     salt=salt or secrets.token_hex(16)
     return salt+":"+hashlib.pbkdf2_hmac("sha256",p.encode(),bytes.fromhex(salt),260000).hex()
@@ -28,16 +37,10 @@ def checkpwd(p,h):
     except:return False
 def init():
     with conn() as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT UNIQUE NOT NULL,name TEXT NOT NULL,role TEXT NOT NULL,password_hash TEXT NOT NULL,city TEXT NOT NULL DEFAULT '',district TEXT NOT NULL DEFAULT '',pin TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT '',service_areas TEXT NOT NULL DEFAULT '',approved INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS requirements(id INTEGER PRIMARY KEY,buyer_id INTEGER NOT NULL REFERENCES users(id),category TEXT NOT NULL,product TEXT NOT NULL,quantity TEXT NOT NULL,city TEXT NOT NULL,district TEXT NOT NULL,pin TEXT NOT NULL DEFAULT '',details TEXT NOT NULL DEFAULT '',created INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS quotes(id INTEGER PRIMARY KEY,requirement_id INTEGER NOT NULL REFERENCES requirements(id),supplier_id INTEGER NOT NULL REFERENCES users(id),amount REAL NOT NULL,notes TEXT NOT NULL DEFAULT '',created INTEGER NOT NULL,UNIQUE(requirement_id,supplier_id));
-        CREATE TABLE IF NOT EXISTS ads(id INTEGER PRIMARY KEY,supplier_id INTEGER NOT NULL REFERENCES users(id),headline TEXT NOT NULL,category TEXT NOT NULL,target_city TEXT NOT NULL,target_district TEXT NOT NULL DEFAULT '',approved INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL);
-        """)
         email=os.environ.get("CTS_ADMIN_EMAIL","").strip().lower()
         password=os.environ.get("CTS_ADMIN_PASSWORD","")
-        if email and password and len(password)>=12 and not c.execute("SELECT 1 FROM users WHERE email=?",(email,)).fetchone():
-            c.execute("INSERT INTO users(email,name,role,password_hash,approved,created) VALUES(?,?,?,?,1,?)",(email,"CTS Administrator","admin",pwdhash(password),int(time.time())))
+        if email and password and len(password)>=12 and not c.execute("SELECT 1 FROM users WHERE email=%s",(email,)).fetchone():
+            c.execute("INSERT INTO users(email,name,role,password_hash,approved,created) VALUES(%s,%s,%s,%s,1,%s)",(email,"CTS Administrator","admin",pwdhash(password),int(time.time())))
 init()
 class Register(BaseModel):
     name:str=Field(min_length=2,max_length=100)
@@ -61,7 +64,7 @@ def me(request):
     uid=request.session.get("uid")
     if not uid:raise HTTPException(401,"Please log in")
     with conn() as c:
-        u=c.execute("SELECT id,email,name,role,city,district,pin,category,service_areas,approved FROM users WHERE id=?",(uid,)).fetchone()
+        u=c.execute("SELECT id,email,name,role,city,district,pin,category,service_areas,approved FROM users WHERE id=%s",(uid,)).fetchone()
     if not u:raise HTTPException(401,"Session expired")
     return dict(u)
 def role(request,r):
@@ -92,12 +95,12 @@ def register(d:Register):
     if d.pin and (len(d.pin)!=6 or not d.pin.isdigit()):raise HTTPException(400,"PIN must have 6 digits")
     with conn() as c:
         try:
-            c.execute("INSERT INTO users(email,name,role,password_hash,city,district,pin,category,service_areas,approved,created) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(d.email.strip().lower(),d.name.strip(),d.role,pwdhash(d.password),d.city.strip(),d.district.strip(),d.pin,d.category if d.role=="supplier" else "",d.service_areas.strip() if d.role=="supplier" else "",1 if d.role=="buyer" else 0,int(time.time())))
-        except sqlite3.IntegrityError:raise HTTPException(409,"Email already registered")
+            c.execute("INSERT INTO users(email,name,role,password_hash,city,district,pin,category,service_areas,approved,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",(d.email.strip().lower(),d.name.strip(),d.role,pwdhash(d.password),d.city.strip(),d.district.strip(),d.pin,d.category if d.role=="supplier" else "",d.service_areas.strip() if d.role=="supplier" else "",1 if d.role=="buyer" else 0,int(time.time())))
+        except psycopg.IntegrityError:raise HTTPException(409,"Email already registered")
     return {"ok":True,"message":"Account created. Supplier listings require CTS approval." if d.role=="supplier" else "Buyer account created. Please sign in."}
 @app.post("/api/login")
 def login(d:Login,request:Request):
-    with conn() as c:u=c.execute("SELECT * FROM users WHERE email=?",(d.email.strip().lower(),)).fetchone()
+    with conn() as c:u=c.execute("SELECT * FROM users WHERE email=%s",(d.email.strip().lower(),)).fetchone()
     if not u or not checkpwd(d.password,u["password_hash"]):raise HTTPException(401,"Invalid email or password")
     request.session.clear();request.session["uid"]=u["id"]
     return {"ok":True,"role":u["role"]}
@@ -114,8 +117,8 @@ def post_requirement(d:Requirement,request:Request):
     u=role(request,"buyer")
     if d.category not in CATS:raise HTTPException(400,"Invalid category")
     with conn() as c:
-        cur=c.execute("INSERT INTO requirements(buyer_id,category,product,quantity,city,district,pin,details,created) VALUES(?,?,?,?,?,?,?,?,?)",(u["id"],d.category,d.product,d.quantity,d.city,d.district,d.pin,d.details,int(time.time())))
-        return {"ok":True,"id":cur.lastrowid}
+        cur=c.execute("INSERT INTO requirements(buyer_id,category,product,quantity,city,district,pin,details,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",(u["id"],d.category,d.product,d.quantity,d.city,d.district,d.pin,d.details,int(time.time())))
+        return {"ok":True,"id":cur.fetchone()["id"]}
 @app.get("/api/requirements")
 def requirements(request:Request):
     u=me(request)
@@ -131,28 +134,28 @@ def post_quote(d:Quote,request:Request):
     u=role(request,"supplier")
     if not u["approved"]:raise HTTPException(403,"CTS approval pending")
     with conn() as c:
-        r=c.execute("SELECT * FROM requirements WHERE id=?",(d.requirement_id,)).fetchone()
+        r=c.execute("SELECT * FROM requirements WHERE id=%s",(d.requirement_id,)).fetchone()
         if not r:raise HTTPException(404,"Requirement not found")
         if not matches(dict(r),u):raise HTTPException(403,"Requirement is outside your matching area/category")
-        try:c.execute("INSERT INTO quotes(requirement_id,supplier_id,amount,notes,created) VALUES(?,?,?,?,?)",(d.requirement_id,u["id"],d.amount,d.notes,int(time.time())))
-        except sqlite3.IntegrityError:raise HTTPException(409,"You have already quoted for this requirement")
+        try:c.execute("INSERT INTO quotes(requirement_id,supplier_id,amount,notes,created) VALUES(%s,%s,%s,%s,%s)",(d.requirement_id,u["id"],d.amount,d.notes,int(time.time())))
+        except psycopg.IntegrityError:raise HTTPException(409,"You have already quoted for this requirement")
     return {"ok":True}
 @app.get("/api/quotes/{reqid}")
 def quotes(reqid:int,request:Request):
     u=me(request)
     with conn() as c:
-        r=c.execute("SELECT buyer_id FROM requirements WHERE id=?",(reqid,)).fetchone()
+        r=c.execute("SELECT buyer_id FROM requirements WHERE id=%s",(reqid,)).fetchone()
         if not r:raise HTTPException(404,"Requirement not found")
         if u["role"]=="buyer" and r["buyer_id"]!=u["id"]:raise HTTPException(403,"Not your requirement")
         if u["role"]=="supplier":
-            q=c.execute("SELECT 1 FROM quotes WHERE requirement_id=? AND supplier_id=?",(reqid,u["id"])).fetchone()
+            q=c.execute("SELECT 1 FROM quotes WHERE requirement_id=%s AND supplier_id=%s",(reqid,u["id"])).fetchone()
             if not q:raise HTTPException(403,"Not your quotation")
-        return [dict(x) for x in c.execute("SELECT q.id,q.amount,q.notes,q.created,u.name supplier_name FROM quotes q JOIN users u ON u.id=q.supplier_id WHERE q.requirement_id=? ORDER BY q.amount",(reqid,))]
+        return [dict(x) for x in c.execute("SELECT q.id,q.amount,q.notes,q.created,u.name supplier_name FROM quotes q JOIN users u ON u.id=q.supplier_id WHERE q.requirement_id=%s ORDER BY q.amount",(reqid,))]
 @app.post("/api/ads")
 def create_ad(d:Ad,request:Request):
     u=role(request,"supplier")
     if d.category not in CATS:raise HTTPException(400,"Invalid category")
-    with conn() as c:c.execute("INSERT INTO ads(supplier_id,headline,category,target_city,target_district,created) VALUES(?,?,?,?,?,?)",(u["id"],d.headline,d.category,d.target_city,d.target_district,int(time.time())))
+    with conn() as c:c.execute("INSERT INTO ads(supplier_id,headline,category,target_city,target_district,created) VALUES(%s,%s,%s,%s,%s,%s)",(u["id"],d.headline,d.category,d.target_city,d.target_district,int(time.time())))
     return {"ok":True,"message":"Advertisement submitted for CTS approval"}
 @app.get("/api/ads")
 def ads(city:str=""):
@@ -162,13 +165,13 @@ def ads(city:str=""):
 def admin(request:Request):
     role(request,"admin")
     with conn() as c:
-        return {"users":[dict(x) for x in c.execute("SELECT id,name,email,role,city,district,category,approved FROM users ORDER BY id DESC LIMIT 300")],"ads":[dict(x) for x in c.execute("SELECT a.id,a.headline,a.target_city,a.approved,u.name supplier_name FROM ads a JOIN users u ON u.id=a.supplier_id ORDER BY a.id DESC LIMIT 300")],"counts":{k:c.execute("SELECT COUNT(*) FROM "+table).fetchone()[0] for k,table in [("users","users"),("requirements","requirements"),("quotes","quotes"),("ads","ads")]}}
+        return {"users":[dict(x) for x in c.execute("SELECT id,name,email,role,city,district,category,approved FROM users ORDER BY id DESC LIMIT 300")],"ads":[dict(x) for x in c.execute("SELECT a.id,a.headline,a.target_city,a.approved,u.name supplier_name FROM ads a JOIN users u ON u.id=a.supplier_id ORDER BY a.id DESC LIMIT 300")],"counts":{k:c.execute("SELECT COUNT(*) AS count FROM "+table).fetchone()["count"] for k,table in [("users","users"),("requirements","requirements"),("quotes","quotes"),("ads","ads")]}}
 @app.post("/api/admin/approve/{kind}/{itemid}")
 def approve(kind:str,itemid:int,request:Request):
     role(request,"admin")
     table={"supplier":"users","ad":"ads"}.get(kind)
     if not table:raise HTTPException(400,"Invalid approval type")
     with conn() as c:
-        if kind=="supplier":c.execute("UPDATE users SET approved=1 WHERE id=? AND role='supplier'",(itemid,))
-        else:c.execute("UPDATE ads SET approved=1 WHERE id=?",(itemid,))
+        if kind=="supplier":c.execute("UPDATE users SET approved=1 WHERE id=%s AND role='supplier'",(itemid,))
+        else:c.execute("UPDATE ads SET approved=1 WHERE id=%s",(itemid,))
     return {"ok":True}
