@@ -46,6 +46,21 @@ def init():
         if email and password and len(password)>=12 and not c.execute("SELECT 1 FROM users WHERE email=%s",(email,)).fetchone():
             c.execute("INSERT INTO users(email,name,role,password_hash,approved,created) VALUES(%s,%s,%s,%s,1,%s)",(email,"CTS Administrator","admin",pwdhash(password),int(time.time())))
 init()
+def reset_admin_password():
+    # Recovery is controlled by the operator's private Render environment.
+    if os.environ.get("CTS_ADMIN_PASSWORD_RESET", "") != "1":
+        return
+    email=os.environ.get("CTS_ADMIN_EMAIL", "").strip().lower()
+    password=os.environ.get("CTS_ADMIN_PASSWORD", "")
+    if not email or len(password)<12:
+        raise RuntimeError("Admin recovery requires an email and password of at least 12 characters")
+    with conn() as c:
+        u=c.execute("SELECT id,password_hash FROM users WHERE email=%s AND role='admin'",(email,)).fetchone()
+        if not u:
+            raise RuntimeError("Admin recovery account not found")
+        if not checkpwd(password,u["password_hash"]):
+            c.execute("UPDATE users SET password_hash=%s WHERE id=%s AND role='admin'",(pwdhash(password),u["id"]))
+reset_admin_password()
 class Register(BaseModel):
     name:str=Field(min_length=2,max_length=100)
     email:str=Field(min_length=5,max_length=180)
