@@ -49,6 +49,7 @@ init()
 class Register(BaseModel):
     name:str=Field(min_length=2,max_length=100)
     email:str=Field(min_length=5,max_length=180)
+    phone:str=Field(min_length=10,max_length=20)
     password:str=Field(min_length=10,max_length=200)
     role:str
     city:str=Field(min_length=2,max_length=90)
@@ -72,7 +73,7 @@ def me(request):
     uid=request.session.get("uid")
     if not uid:raise HTTPException(401,"Please log in")
     with conn() as c:
-        u=c.execute("SELECT id,email,name,role,city,district,pin,category,service_areas,approved,membership_until FROM users WHERE id=%s",(uid,)).fetchone()
+        u=c.execute("SELECT id,email,phone,name,role,city,district,pin,category,service_areas,approved,membership_until FROM users WHERE id=%s",(uid,)).fetchone()
     if not u:raise HTTPException(401,"Session expired")
     return dict(u)
 def role(request,r):
@@ -101,10 +102,12 @@ def register(d:Register):
     if d.role not in ("buyer","supplier"):raise HTTPException(400,"Invalid role")
     if d.role=="supplier" and d.category not in CATS:raise HTTPException(400,"Select a supplier category")
     if d.pin and (len(d.pin)!=6 or not d.pin.isdigit()):raise HTTPException(400,"PIN must have 6 digits")
+    phone="".join(ch for ch in d.phone if ch.isdigit())
+    if len(phone)<10 or len(phone)>15:raise HTTPException(400,"Enter a valid mobile number")
     with conn() as c:
         try:
-            c.execute("INSERT INTO users(email,name,role,password_hash,city,district,pin,category,service_areas,approved,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",(d.email.strip().lower(),d.name.strip(),d.role,pwdhash(d.password),d.city.strip(),d.district.strip(),d.pin,d.category if d.role=="supplier" else "",d.service_areas.strip() if d.role=="supplier" else "",1 if d.role=="buyer" else 0,int(time.time())))
-        except psycopg.IntegrityError:raise HTTPException(409,"Email already registered")
+            c.execute("INSERT INTO users(email,phone,name,role,password_hash,city,district,pin,category,service_areas,approved,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",(d.email.strip().lower(),phone,d.name.strip(),d.role,pwdhash(d.password),d.city.strip(),d.district.strip(),d.pin,d.category if d.role=="supplier" else "",d.service_areas.strip() if d.role=="supplier" else "",1 if d.role=="buyer" else 0,int(time.time())))
+        except psycopg.IntegrityError:raise HTTPException(409,"Email or mobile number already registered")
     return {"ok":True,"message":"Account created. Supplier listings require CTS approval." if d.role=="supplier" else "Buyer account created. Please sign in."}
 @app.post("/api/login")
 def login(d:Login,request:Request):
@@ -188,7 +191,7 @@ def payment_order(request:Request):
         raise HTTPException(502,"Unable to create payment order")
     with conn() as c:
         c.execute("INSERT INTO payments(user_id,provider_order_id,amount_paise,currency,status,created) VALUES(%s,%s,%s,%s,%s,%s)",(u["id"],order["id"],MEMBERSHIP_AMOUNT_PAISE,"INR","created",int(time.time())))
-    return {"key":RAZORPAY_KEY_ID,"order_id":order["id"],"amount":MEMBERSHIP_AMOUNT_PAISE,"currency":"INR","name":"CTS ConstructConnect","description":"Verified Supplier Annual Membership","prefill":{"name":u["name"],"email":u["email"]}}
+    return {"key":RAZORPAY_KEY_ID,"order_id":order["id"],"amount":MEMBERSHIP_AMOUNT_PAISE,"currency":"INR","name":"CTS ConstructConnect","description":"Verified Supplier Annual Membership","prefill":{"name":u["name"],"email":u["email"],"contact":u["phone"]}}
 
 @app.post("/api/payments/verify")
 def payment_verify(d:PaymentVerify,request:Request):
@@ -211,7 +214,7 @@ def payment_verify(d:PaymentVerify,request:Request):
 def admin(request:Request):
     role(request,"admin")
     with conn() as c:
-        return {"users":[dict(x) for x in c.execute("SELECT id,name,email,role,city,district,category,approved FROM users ORDER BY id DESC LIMIT 300")],"ads":[dict(x) for x in c.execute("SELECT a.id,a.headline,a.target_city,a.approved,u.name supplier_name FROM ads a JOIN users u ON u.id=a.supplier_id ORDER BY a.id DESC LIMIT 300")],"counts":{k:c.execute("SELECT COUNT(*) AS count FROM "+table).fetchone()["count"] for k,table in [("users","users"),("requirements","requirements"),("quotes","quotes"),("ads","ads")]}}
+        return {"users":[dict(x) for x in c.execute("SELECT id,name,email,phone,role,city,district,category,approved FROM users ORDER BY id DESC LIMIT 300")],"ads":[dict(x) for x in c.execute("SELECT a.id,a.headline,a.target_city,a.approved,u.name supplier_name FROM ads a JOIN users u ON u.id=a.supplier_id ORDER BY a.id DESC LIMIT 300")],"counts":{k:c.execute("SELECT COUNT(*) AS count FROM "+table).fetchone()["count"] for k,table in [("users","users"),("requirements","requirements"),("quotes","quotes"),("ads","ads")]}}
 @app.post("/api/admin/approve/{kind}/{itemid}")
 def approve(kind:str,itemid:int,request:Request):
     role(request,"admin")
