@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -18,6 +19,7 @@ RAZORPAY_KEY_SECRET=os.environ.get("RAZORPAY_KEY_SECRET","")
 MEMBERSHIP_AMOUNT_PAISE=2000000
 app=FastAPI(title="CTS ConstructConnect")
 app.add_middleware(SessionMiddleware,secret_key=SECRET,https_only=os.environ.get("CTS_HTTPS","0")=="1",same_site="lax",max_age=86400*7)
+app.mount("/static",StaticFiles(directory=BASE/"static"),name="static")
 CATS=["Cement","Steel & TMT","Hardware & Tools","M-Sand & Aggregates","Ready-Mix Concrete","Bricks & Blocks","Electrical","Plumbing & Sanitary","Paints & Chemicals","Tiles & Flooring","Construction Equipment","Crusher & Plant Spares","Equipment Rental","Contractors & Services","Manpower","Transport & Logistics","Real Estate","Tenders & Projects","Industrial Supplies","Safety Equipment"]
 @contextmanager
 def conn():
@@ -256,3 +258,4 @@ def ad_picture(adid:int,request:Request):
         u=me(request)
         if u["role"]!="admin" and u["id"]!=a["supplier_id"]:raise HTTPException(403,"Awaiting approval")
     return Response(bytes(a["image_data"]),media_type=a["image_type"],headers={"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"})
+
