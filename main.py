@@ -69,11 +69,20 @@ class Register(BaseModel):
     phone:str=Field(min_length=10,max_length=20)
     password:str=Field(min_length=10,max_length=200)
     role:str
+    country:str=Field(default="India",min_length=2,max_length=90)
+    state_region:str=Field(default="",max_length=100)
     city:str=Field(min_length=2,max_length=90)
     district:str=Field(default="",max_length=90)
-    pin:str=Field(default="",max_length=6)
+    postal_code:str=Field(default="",max_length=20)
+    pin:str=Field(default="",max_length=20)
+    whatsapp:str=Field(default="",max_length=30)
+    website:str=Field(default="",max_length=250)
+    company_type:str=Field(default="",max_length=100)
+    products_services:str=Field(default="",max_length=1000)
+    target_markets:str=Field(default="",max_length=500)
+    public_contact:bool=False
     category:str=Field(default="",max_length=80)
-    service_areas:str=Field(default="",max_length=250)
+    service_areas:str=Field(default="",max_length=500)
 class Login(BaseModel):
     email:str;password:str
 class Requirement(BaseModel):
@@ -92,7 +101,7 @@ def me(request):
     uid=request.session.get("uid")
     if not uid:raise HTTPException(401,"Please log in")
     with conn() as c:
-        u=c.execute("SELECT id,email,phone,name,role,city,district,pin,category,service_areas,approved,membership_until FROM users WHERE id=%s",(uid,)).fetchone()
+        u=c.execute("SELECT id,email,phone,name,role,country,state_region,city,district,postal_code,pin,whatsapp,website,company_type,products_services,target_markets,public_contact,category,service_areas,approved,membership_until FROM users WHERE id=%s",(uid,)).fetchone()
     if not u:raise HTTPException(401,"Session expired")
     return dict(u)
 def role(request,r):
@@ -100,18 +109,23 @@ def role(request,r):
     if u["role"]!=r:raise HTTPException(403,"This action requires "+r+" access")
     return u
 def publicuser(u):
-    return {k:u[k] for k in ["id","name","role","city","district","pin","category","service_areas","approved"]}
+    fields=["id","name","role","country","state_region","city","district","postal_code","category","service_areas","website","company_type","products_services","target_markets","approved"]
+    out={k:u[k] for k in fields}
+    if u.get("public_contact"):
+        out["phone"]=u.get("phone","")
+        out["whatsapp"]=u.get("whatsapp","")
+    return out
 def matches(req,supplier):
     if req["category"]!=supplier["category"]:return False
     areas=[supplier["city"],supplier["district"],supplier["pin"]]+[a.strip() for a in supplier["service_areas"].split(",")]
     locs=[req["city"],req["district"],req["pin"]]
     return any(a.strip() and b.strip() and a.casefold().strip()==b.casefold().strip() for a in areas for b in locs)
 @app.get("/")
-def index():return FileResponse(BASE/"static"/"index.html")
+def index():return FileResponse(BASE/"static"/"index.html",headers={"Cache-Control":"no-cache, no-store, must-revalidate"})
 @app.get("/manifest.webmanifest")
 def manifest():return FileResponse(BASE/"static"/"manifest.webmanifest",media_type="application/manifest+json")
 @app.get("/sw.js")
-def sw():return FileResponse(BASE/"static"/"sw.js",media_type="text/javascript")
+def sw():return FileResponse(BASE/"static"/"sw.js",media_type="text/javascript",headers={"Cache-Control":"no-cache, no-store, must-revalidate"})
 @app.get("/icon.svg")
 def icon():return FileResponse(BASE/"static"/"icon.svg",media_type="image/svg+xml")
 @app.get("/api/categories")
@@ -120,12 +134,19 @@ def categories():return CATS
 def register(d:Register):
     if d.role not in ("buyer","supplier"):raise HTTPException(400,"Invalid role")
     if d.role=="supplier" and d.category not in CATS:raise HTTPException(400,"Select a supplier category")
-    if d.pin and (len(d.pin)!=6 or not d.pin.isdigit()):raise HTTPException(400,"PIN must have 6 digits")
+    country=d.country.strip()
+    postal=(d.postal_code or d.pin).strip()
+    if not country:raise HTTPException(400,"Select or enter a country")
+    if postal and (len(postal)<3 or len(postal)>20):raise HTTPException(400,"Enter a valid postal / ZIP code")
     phone="".join(ch for ch in d.phone if ch.isdigit())
-    if len(phone)<10 or len(phone)>15:raise HTTPException(400,"Enter a valid mobile number")
+    whatsapp="".join(ch for ch in d.whatsapp if ch.isdigit())
+    if len(phone)<7 or len(phone)>15:raise HTTPException(400,"Enter a valid international phone number with country code")
+    if whatsapp and (len(whatsapp)<7 or len(whatsapp)>15):raise HTTPException(400,"Enter a valid WhatsApp number with country code")
+    website=d.website.strip()
+    if website and not website.lower().startswith(("http://","https://")):website="https://"+website
     with conn() as c:
         try:
-            c.execute("INSERT INTO users(email,phone,name,role,password_hash,city,district,pin,category,service_areas,approved,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",(d.email.strip().lower(),phone,d.name.strip(),d.role,pwdhash(d.password),d.city.strip(),d.district.strip(),d.pin,d.category if d.role=="supplier" else "",d.service_areas.strip() if d.role=="supplier" else "",1 if d.role=="buyer" else 0,int(time.time())))
+            c.execute("INSERT INTO users(email,phone,name,role,password_hash,country,state_region,city,district,postal_code,pin,whatsapp,website,company_type,products_services,target_markets,public_contact,category,service_areas,approved,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",(d.email.strip().lower(),phone,d.name.strip(),d.role,pwdhash(d.password),country,d.state_region.strip(),d.city.strip(),d.district.strip(),postal,postal,whatsapp,website,d.company_type.strip(),d.products_services.strip(),d.target_markets.strip(),d.public_contact,d.category if d.role=="supplier" else "",d.service_areas.strip() if d.role=="supplier" else "",1 if d.role=="buyer" else 0,int(time.time())))
         except psycopg.IntegrityError:raise HTTPException(409,"Email or mobile number already registered")
     return {"ok":True,"message":"Registration received. CTS will verify and activate your supplier profile shortly." if d.role=="supplier" else "Buyer account created successfully. Please sign in to post your requirement."}
 @app.post("/api/login")
@@ -139,9 +160,9 @@ def logout(request:Request):request.session.clear();return {"ok":True}
 @app.get("/api/me")
 def who(request:Request):return me(request)
 @app.get("/api/suppliers")
-def suppliers(category:str="",city:str=""):
-    with conn() as c:rows=[dict(r) for r in c.execute("SELECT id,name,city,district,pin,category,service_areas FROM users WHERE role='supplier' AND approved=1 ORDER BY id DESC LIMIT 300")]
-    return [r for r in rows if (not category or r["category"]==category) and (not city or city.casefold() in " ".join([r["city"],r["district"],r["service_areas"]]).casefold())]
+def suppliers(category:str="",city:str="",country:str=""):
+    with conn() as c:rows=[dict(r) for r in c.execute("SELECT id,name,phone,country,state_region,city,district,postal_code,category,service_areas,whatsapp,website,company_type,products_services,target_markets,public_contact,approved FROM users WHERE role='supplier' AND approved=1 ORDER BY id DESC LIMIT 300")]
+    return [publicuser(r) for r in rows if (not category or r["category"]==category) and (not country or r["country"].casefold()==country.casefold()) and (not city or city.casefold() in " ".join([r["city"],r["district"],r["state_region"],r["country"],r["service_areas"]]).casefold())]
 @app.post("/api/requirements")
 def post_requirement(d:Requirement,request:Request):
     u=role(request,"buyer")
