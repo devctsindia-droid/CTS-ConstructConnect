@@ -127,7 +127,7 @@ def register(d:Register):
         try:
             c.execute("INSERT INTO users(email,phone,name,role,password_hash,city,district,pin,category,service_areas,approved,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",(d.email.strip().lower(),phone,d.name.strip(),d.role,pwdhash(d.password),d.city.strip(),d.district.strip(),d.pin,d.category if d.role=="supplier" else "",d.service_areas.strip() if d.role=="supplier" else "",1 if d.role=="buyer" else 0,int(time.time())))
         except psycopg.IntegrityError:raise HTTPException(409,"Email or mobile number already registered")
-    return {"ok":True,"message":"Account created. Supplier listings require CTS approval." if d.role=="supplier" else "Buyer account created. Please sign in."}
+    return {"ok":True,"message":"Registration received. CTS will verify and activate your supplier profile shortly." if d.role=="supplier" else "Buyer account created successfully. Please sign in to post your requirement."}
 @app.post("/api/login")
 def login(d:Login,request:Request):
     with conn() as c:u=c.execute("SELECT * FROM users WHERE email=%s",(d.email.strip().lower(),)).fetchone()
