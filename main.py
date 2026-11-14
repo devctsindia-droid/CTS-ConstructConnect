@@ -45,6 +45,7 @@ def checkpwd(p,h):
     except:return False
 def init():
     with conn() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS guest_requirements (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, phone TEXT NOT NULL, category TEXT NOT NULL, product TEXT NOT NULL, quantity TEXT NOT NULL, city TEXT NOT NULL, district TEXT NOT NULL, pin TEXT NOT NULL DEFAULT '', details TEXT NOT NULL DEFAULT '', created BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'new')""")
         email=os.environ.get("CTS_ADMIN_EMAIL","").strip().lower()
         password=os.environ.get("CTS_ADMIN_PASSWORD","")
         if email and password and len(password)>=12 and not c.execute("SELECT 1 FROM users WHERE email=%s",(email,)).fetchone():
@@ -89,6 +90,9 @@ class Login(BaseModel):
     email:str;password:str
 class Requirement(BaseModel):
     category:str;product:str=Field(min_length=3,max_length=160);quantity:str=Field(min_length=1,max_length=80);city:str=Field(min_length=2,max_length=90);district:str=Field(min_length=2,max_length=90);pin:str=Field(default="",max_length=6);details:str=Field(default="",max_length=1200)
+class GuestRequirement(Requirement):
+    name:str=Field(min_length=2,max_length=100)
+    phone:str=Field(min_length=7,max_length=20)
 class Quote(BaseModel):
     requirement_id:int;amount:float=Field(gt=0,le=10000000000);notes:str=Field(default="",max_length=600)
 class Ad(BaseModel):
@@ -173,6 +177,15 @@ def post_requirement(d:Requirement,request:Request):
     with conn() as c:
         cur=c.execute("INSERT INTO requirements(buyer_id,category,product,quantity,city,district,pin,details,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",(u["id"],d.category,d.product,d.quantity,d.city,d.district,d.pin,d.details,int(time.time())))
         return {"ok":True,"id":cur.fetchone()["id"]}
+@app.post("/api/requirements/guest")
+def post_guest_requirement(d:GuestRequirement):
+    if d.category not in CATS:raise HTTPException(400,"Invalid category")
+    phone="".join(ch for ch in d.phone if ch.isdigit())
+    if len(phone)<7 or len(phone)>15:raise HTTPException(400,"Enter a valid phone or WhatsApp number with country code")
+    with conn() as c:
+        cur=c.execute("INSERT INTO guest_requirements(name,phone,category,product,quantity,city,district,pin,details,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",(d.name.strip(),phone,d.category,d.product,d.quantity,d.city,d.district,d.pin,d.details,int(time.time())))
+        itemid=cur.fetchone()["id"]
+    return {"ok":True,"id":itemid,"message":"Requirement submitted to CTS successfully. CTS will review and contact you."}
 @app.get("/api/requirements")
 def requirements(request:Request):
     u=me(request)
@@ -263,7 +276,7 @@ def payment_verify(d:PaymentVerify,request:Request):
 def admin(request:Request):
     role(request,"admin")
     with conn() as c:
-        return {"users":[dict(x) for x in c.execute("SELECT id,name,email,phone,role,city,district,category,approved FROM users ORDER BY id DESC LIMIT 300")],"ads":[dict(x) for x in c.execute("SELECT a.id,a.headline,a.target_city,a.approved,u.name supplier_name FROM ads a JOIN users u ON u.id=a.supplier_id ORDER BY a.id DESC LIMIT 300")],"counts":{k:c.execute("SELECT COUNT(*) AS count FROM "+table).fetchone()["count"] for k,table in [("users","users"),("requirements","requirements"),("quotes","quotes"),("ads","ads")]}}
+        return {"users":[dict(x) for x in c.execute("SELECT id,name,email,phone,role,city,district,category,approved FROM users ORDER BY id DESC LIMIT 300")],"guest_requirements":[dict(x) for x in c.execute("SELECT id,name,phone,category,product,quantity,city,district,pin,details,created,status FROM guest_requirements ORDER BY id DESC LIMIT 300")],"ads":[dict(x) for x in c.execute("SELECT a.id,a.headline,a.target_city,a.approved,u.name supplier_name FROM ads a JOIN users u ON u.id=a.supplier_id ORDER BY a.id DESC LIMIT 300")],"counts":{k:c.execute("SELECT COUNT(*) AS count FROM "+table).fetchone()["count"] for k,table in [("users","users"),("requirements","requirements"),("guest_requirements","guest_requirements"),("quotes","quotes"),("ads","ads")]}}
 @app.post("/api/admin/approve/{kind}/{itemid}")
 def approve(kind:str,itemid:int,request:Request):
     role(request,"admin")
