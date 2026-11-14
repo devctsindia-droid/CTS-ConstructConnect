@@ -45,7 +45,6 @@ def checkpwd(p,h):
     except:return False
 def init():
     with conn() as c:
-        c.execute("""CREATE TABLE IF NOT EXISTS guest_requirements (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, phone TEXT NOT NULL, category TEXT NOT NULL, product TEXT NOT NULL, quantity TEXT NOT NULL, city TEXT NOT NULL, district TEXT NOT NULL, pin TEXT NOT NULL DEFAULT '', details TEXT NOT NULL DEFAULT '', created BIGINT NOT NULL, status TEXT NOT NULL DEFAULT 'new')""")
         email=os.environ.get("CTS_ADMIN_EMAIL","").strip().lower()
         password=os.environ.get("CTS_ADMIN_PASSWORD","")
         if email and password and len(password)>=12 and not c.execute("SELECT 1 FROM users WHERE email=%s",(email,)).fetchone():
@@ -182,8 +181,16 @@ def post_guest_requirement(d:GuestRequirement):
     if d.category not in CATS:raise HTTPException(400,"Invalid category")
     phone="".join(ch for ch in d.phone if ch.isdigit())
     if len(phone)<7 or len(phone)>15:raise HTTPException(400,"Enter a valid phone or WhatsApp number with country code")
+    now=int(time.time())
+    guest_email=f"voice-{phone}@guest.cts.invalid"
     with conn() as c:
-        cur=c.execute("INSERT INTO guest_requirements(name,phone,category,product,quantity,city,district,pin,details,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",(d.name.strip(),phone,d.category,d.product,d.quantity,d.city,d.district,d.pin,d.details,int(time.time())))
+        u=c.execute("SELECT id FROM users WHERE phone=%s OR email=%s ORDER BY id LIMIT 1",(phone,guest_email)).fetchone()
+        if u:
+            buyer_id=u["id"]
+        else:
+            cur=c.execute("INSERT INTO users(email,phone,name,role,password_hash,country,state_region,city,district,postal_code,pin,whatsapp,website,company_type,products_services,target_markets,public_contact,category,service_areas,approved,created) VALUES(%s,%s,%s,'buyer',%s,'India','',%s,%s,%s,%s,%s,'','','','','','','',1,%s) RETURNING id",(guest_email,phone,d.name.strip(),pwdhash(secrets.token_urlsafe(24)),d.city.strip(),d.district.strip(),d.pin.strip(),d.pin.strip(),phone,now))
+            buyer_id=cur.fetchone()["id"]
+        cur=c.execute("INSERT INTO requirements(buyer_id,category,product,quantity,city,district,pin,details,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",(buyer_id,d.category,d.product,d.quantity,d.city,d.district,d.pin,"Voice/guest submission — "+d.details,now))
         itemid=cur.fetchone()["id"]
     return {"ok":True,"id":itemid,"message":"Requirement submitted to CTS successfully. CTS will review and contact you."}
 @app.get("/api/requirements")
@@ -276,7 +283,7 @@ def payment_verify(d:PaymentVerify,request:Request):
 def admin(request:Request):
     role(request,"admin")
     with conn() as c:
-        return {"users":[dict(x) for x in c.execute("SELECT id,name,email,phone,role,city,district,category,approved FROM users ORDER BY id DESC LIMIT 300")],"guest_requirements":[dict(x) for x in c.execute("SELECT id,name,phone,category,product,quantity,city,district,pin,details,created,status FROM guest_requirements ORDER BY id DESC LIMIT 300")],"ads":[dict(x) for x in c.execute("SELECT a.id,a.headline,a.target_city,a.approved,u.name supplier_name FROM ads a JOIN users u ON u.id=a.supplier_id ORDER BY a.id DESC LIMIT 300")],"counts":{k:c.execute("SELECT COUNT(*) AS count FROM "+table).fetchone()["count"] for k,table in [("users","users"),("requirements","requirements"),("guest_requirements","guest_requirements"),("quotes","quotes"),("ads","ads")]}}
+        return {"users":[dict(x) for x in c.execute("SELECT id,name,email,phone,role,city,district,category,approved FROM users ORDER BY id DESC LIMIT 300")],"ads":[dict(x) for x in c.execute("SELECT a.id,a.headline,a.target_city,a.approved,u.name supplier_name FROM ads a JOIN users u ON u.id=a.supplier_id ORDER BY a.id DESC LIMIT 300")],"counts":{k:c.execute("SELECT COUNT(*) AS count FROM "+table).fetchone()["count"] for k,table in [("users","users"),("requirements","requirements"),("quotes","quotes"),("ads","ads")]}}
 @app.post("/api/admin/approve/{kind}/{itemid}")
 def approve(kind:str,itemid:int,request:Request):
     role(request,"admin")
