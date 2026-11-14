@@ -166,7 +166,7 @@ def logout(request:Request):request.session.clear();return {"ok":True}
 def who(request:Request):return me(request)
 @app.get("/api/suppliers")
 def suppliers(category:str="",city:str="",country:str="",division:str=""):
-    with conn() as c:rows=[dict(r) for r in c.execute("SELECT id,name,phone,country,state_region,city,district,postal_code,category,service_areas,whatsapp,website,company_type,products_services,target_markets,public_contact,approved FROM users WHERE role='supplier' AND approved=1 ORDER BY id DESC LIMIT 300")]
+    with conn() as c:rows=[dict(r) for r in c.execute("SELECT id,name,role,phone,country,state_region,city,district,postal_code,category,service_areas,whatsapp,website,company_type,products_services,target_markets,public_contact,approved FROM users WHERE role='supplier' AND approved=1 ORDER BY id DESC LIMIT 300")]
     allowed=MACHINERY_CATS if division=="machinery" else MATERIAL_CATS if division=="materials" else None
     return [publicuser(r) for r in rows if (not category or r["category"]==category) and (allowed is None or r["category"] in allowed) and (not country or r["country"].casefold()==country.casefold()) and (not city or city.casefold() in " ".join([r["city"],r["district"],r["state_region"],r["country"],r["service_areas"]]).casefold())]
 @app.post("/api/requirements")
