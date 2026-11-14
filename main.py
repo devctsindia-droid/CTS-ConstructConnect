@@ -21,6 +21,8 @@ app=FastAPI(title="CTS ConstructConnect")
 app.add_middleware(SessionMiddleware,secret_key=SECRET,https_only=os.environ.get("CTS_HTTPS","0")=="1",same_site="lax",max_age=86400*7)
 app.mount("/static",StaticFiles(directory=BASE/"static"),name="static")
 CATS=["Cement","Steel & TMT","Hardware & Tools","M-Sand & Aggregates","Ready-Mix Concrete","Bricks & Blocks","Electrical","Plumbing & Sanitary","Paints & Chemicals","Tiles & Flooring","Construction Equipment","Crusher & Plant Spares","Equipment Rental","Contractors & Services","Manpower","Transport & Logistics","Real Estate","Tenders & Projects","Industrial Supplies","Safety Equipment"]
+MATERIAL_CATS={"Cement","Steel & TMT","Hardware & Tools","M-Sand & Aggregates","Ready-Mix Concrete","Bricks & Blocks","Electrical","Plumbing & Sanitary","Paints & Chemicals","Tiles & Flooring","Industrial Supplies","Safety Equipment"}
+MACHINERY_CATS={"Construction Equipment","Crusher & Plant Spares","Equipment Rental"}
 @contextmanager
 def conn():
     if not DATABASE_URL:
@@ -160,9 +162,10 @@ def logout(request:Request):request.session.clear();return {"ok":True}
 @app.get("/api/me")
 def who(request:Request):return me(request)
 @app.get("/api/suppliers")
-def suppliers(category:str="",city:str="",country:str=""):
+def suppliers(category:str="",city:str="",country:str="",division:str=""):
     with conn() as c:rows=[dict(r) for r in c.execute("SELECT id,name,phone,country,state_region,city,district,postal_code,category,service_areas,whatsapp,website,company_type,products_services,target_markets,public_contact,approved FROM users WHERE role='supplier' AND approved=1 ORDER BY id DESC LIMIT 300")]
-    return [publicuser(r) for r in rows if (not category or r["category"]==category) and (not country or r["country"].casefold()==country.casefold()) and (not city or city.casefold() in " ".join([r["city"],r["district"],r["state_region"],r["country"],r["service_areas"]]).casefold())]
+    allowed=MACHINERY_CATS if division=="machinery" else MATERIAL_CATS if division=="materials" else None
+    return [publicuser(r) for r in rows if (not category or r["category"]==category) and (allowed is None or r["category"] in allowed) and (not country or r["country"].casefold()==country.casefold()) and (not city or city.casefold() in " ".join([r["city"],r["district"],r["state_region"],r["country"],r["service_areas"]]).casefold())]
 @app.post("/api/requirements")
 def post_requirement(d:Requirement,request:Request):
     u=role(request,"buyer")
