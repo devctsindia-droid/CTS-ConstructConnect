@@ -283,3 +283,15 @@ def ad_picture(adid:int,request:Request):
         if u["role"]!="admin" and u["id"]!=a["supplier_id"]:raise HTTPException(403,"Awaiting approval")
     return Response(bytes(a["image_data"]),media_type=a["image_type"],headers={"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"})
 
+
+
+# Keep old bookmarks and shared front-end links working on mobile.
+# Unknown API routes still return a proper 404 instead of the app shell.
+@app.get("/{full_path:path}", include_in_schema=False)
+def frontend_fallback(full_path: str):
+    if full_path == "api" or full_path.startswith("api/"):
+        raise HTTPException(404, "API endpoint not found")
+    return FileResponse(
+        BASE/"static"/"index.html",
+        headers={"Cache-Control":"no-cache, no-store, must-revalidate"},
+    )
