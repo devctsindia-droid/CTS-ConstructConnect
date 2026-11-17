@@ -17,6 +17,7 @@ SECRET=os.environ.get("CTS_SECRET","development-only-secret-change-me")
 RAZORPAY_KEY_ID=os.environ.get("RAZORPAY_KEY_ID","")
 RAZORPAY_KEY_SECRET=os.environ.get("RAZORPAY_KEY_SECRET","")
 MEMBERSHIP_AMOUNT_PAISE=2000000
+SUPPLIER_TRIAL_SECONDS=30*86400
 app=FastAPI(title="CTS ConstructConnect")
 app.add_middleware(SessionMiddleware,secret_key=SECRET,https_only=os.environ.get("CTS_HTTPS","0")=="1",same_site="lax",max_age=86400*7)
 app.mount("/static",StaticFiles(directory=BASE/"static"),name="static")
@@ -143,6 +144,13 @@ def matches(req,supplier):
     areas=[supplier["city"],supplier["district"],supplier["pin"]]+[a.strip() for a in supplier["service_areas"].split(",")]
     locs=[req["city"],req["district"],req["pin"]]
     return any(a.strip() and b.strip() and a.casefold().strip()==b.casefold().strip() for a in areas for b in locs)
+def supplier_access(u):
+    return bool(u["approved"] or u["membership_until"]>int(time.time()))
+def requirement_out(row):
+    out=dict(row)
+    out["enquiry_no"]=f"CTS-REQ-{out['id']:06d}"
+    out["source_label"]="Through CTS ConstructConnect"
+    return out
 @app.get("/")
 def index():return FileResponse(BASE/"static"/"index.html",headers={"Cache-Control":"no-cache, no-store, must-revalidate"})
 @app.get("/manifest.webmanifest")
@@ -168,9 +176,10 @@ def quick_register(d:QuickRegister):
         existing=c.execute("SELECT id FROM users WHERE phone=%s OR email=%s",(phone,email)).fetchone()
         if existing:
             return {"ok":True,"message":"You are already registered. CTS will contact you shortly.","id":existing["id"]}
-        cur=c.execute("INSERT INTO users(email,phone,name,role,password_hash,country,state_region,city,district,postal_code,pin,whatsapp,website,company_type,products_services,target_markets,public_contact,category,service_areas,approved,created) VALUES(%s,%s,%s,%s,%s,'India','',%s,'','','',%s,'','','','',FALSE,%s,'',%s,%s) RETURNING id",(email,phone,d.name.strip(),d.role,pwdhash(secrets.token_urlsafe(24)),d.city.strip(),phone,d.category if d.role=="supplier" else "",1 if d.role=="buyer" else 0,now))
+        trial_until=now+SUPPLIER_TRIAL_SECONDS if d.role=="supplier" else 0
+        cur=c.execute("INSERT INTO users(email,phone,name,role,password_hash,country,state_region,city,district,postal_code,pin,whatsapp,website,company_type,products_services,target_markets,public_contact,category,service_areas,approved,membership_until,created) VALUES(%s,%s,%s,%s,%s,'India','',%s,'','','',%s,'','','','',FALSE,%s,'',%s,%s,%s) RETURNING id",(email,phone,d.name.strip(),d.role,pwdhash(secrets.token_urlsafe(24)),d.city.strip(),phone,d.category if d.role=="supplier" else "",1 if d.role=="buyer" else 0,trial_until,now))
         member_id=cur.fetchone()["id"]
-    return {"ok":True,"id":member_id,"message":"Free registration successful. CTS will contact you to complete your profile."}
+    return {"ok":True,"id":member_id,"message":"Free registration successful. Suppliers receive 30 days free access to matched CTS enquiries."}
 
 @app.post("/api/register")
 def register(d:Register):
@@ -188,9 +197,10 @@ def register(d:Register):
     if website and not website.lower().startswith(("http://","https://")):website="https://"+website
     with conn() as c:
         try:
-            c.execute("INSERT INTO users(email,phone,name,role,password_hash,country,state_region,city,district,postal_code,pin,whatsapp,website,company_type,products_services,target_markets,public_contact,category,service_areas,approved,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",(d.email.strip().lower(),phone,d.name.strip(),d.role,pwdhash(d.password),country,d.state_region.strip(),d.city.strip(),d.district.strip(),postal,postal,whatsapp,website,d.company_type.strip(),d.products_services.strip(),d.target_markets.strip(),d.public_contact,d.category if d.role=="supplier" else "",d.service_areas.strip() if d.role=="supplier" else "",1 if d.role=="buyer" else 0,int(time.time())))
+            now=int(time.time());trial_until=now+SUPPLIER_TRIAL_SECONDS if d.role=="supplier" else 0
+            c.execute("INSERT INTO users(email,phone,name,role,password_hash,country,state_region,city,district,postal_code,pin,whatsapp,website,company_type,products_services,target_markets,public_contact,category,service_areas,approved,membership_until,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",(d.email.strip().lower(),phone,d.name.strip(),d.role,pwdhash(d.password),country,d.state_region.strip(),d.city.strip(),d.district.strip(),postal,postal,whatsapp,website,d.company_type.strip(),d.products_services.strip(),d.target_markets.strip(),d.public_contact,d.category if d.role=="supplier" else "",d.service_areas.strip() if d.role=="supplier" else "",1 if d.role=="buyer" else 0,trial_until,now))
         except psycopg.IntegrityError:raise HTTPException(409,"Email or mobile number already registered")
-    return {"ok":True,"message":"Registration received. CTS will verify and activate your supplier profile shortly." if d.role=="supplier" else "Buyer account created successfully. Please sign in to post your requirement."}
+    return {"ok":True,"message":"Supplier registered with 30 days free access to matched CTS enquiries. Please sign in." if d.role=="supplier" else "Buyer account created successfully. Please sign in to post your requirement."}
 @app.post("/api/login")
 def login(d:Login,request:Request):
     with conn() as c:u=c.execute("SELECT * FROM users WHERE email=%s",(d.email.strip().lower(),)).fetchone()
@@ -229,7 +239,8 @@ def post_requirement(d:Requirement,request:Request):
     if d.category not in CATS:raise HTTPException(400,"Invalid category")
     with conn() as c:
         cur=c.execute("INSERT INTO requirements(buyer_id,category,product,quantity,city,district,pin,details,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",(u["id"],d.category,d.product,d.quantity,d.city,d.district,d.pin,d.details,int(time.time())))
-        return {"ok":True,"id":cur.fetchone()["id"]}
+        itemid=cur.fetchone()["id"]
+        return {"ok":True,"id":itemid,"enquiry_no":f"CTS-REQ-{itemid:06d}","message":f"Requirement registered as CTS-REQ-{itemid:06d}."}
 @app.post("/api/requirements/guest")
 def post_guest_requirement(d:GuestRequirement):
     if d.category not in CATS:raise HTTPException(400,"Invalid category")
@@ -246,28 +257,30 @@ def post_guest_requirement(d:GuestRequirement):
             buyer_id=cur.fetchone()["id"]
         cur=c.execute("INSERT INTO requirements(buyer_id,category,product,quantity,city,district,pin,details,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",(buyer_id,d.category,d.product,d.quantity,d.city,d.district,d.pin,"Voice/guest submission — "+d.details,now))
         itemid=cur.fetchone()["id"]
-    return {"ok":True,"id":itemid,"message":"Requirement submitted to CTS successfully. CTS will review and contact you."}
+    return {"ok":True,"id":itemid,"enquiry_no":f"CTS-REQ-{itemid:06d}","message":f"Requirement registered as CTS-REQ-{itemid:06d} through CTS ConstructConnect."}
 @app.get("/api/requirements")
 def requirements(request:Request):
     u=me(request)
     with conn() as c:
         rs=[dict(x) for x in c.execute("SELECT r.*,u.name buyer_name FROM requirements r JOIN users u ON u.id=r.buyer_id ORDER BY r.id DESC LIMIT 300")]
-    if u["role"]=="buyer":return [r for r in rs if r["buyer_id"]==u["id"]]
+    if u["role"]=="buyer":return [requirement_out(r) for r in rs if r["buyer_id"]==u["id"]]
     if u["role"]=="supplier":
-        if not u["approved"]:return []
-        return [r for r in rs if matches(r,u)]
-    return rs
+        if not supplier_access(u):return []
+        return [requirement_out(r) for r in rs if matches(r,u)]
+    return [requirement_out(r) for r in rs]
 @app.post("/api/quotes")
 def post_quote(d:Quote,request:Request):
     u=role(request,"supplier")
-    if not u["approved"]:raise HTTPException(403,"CTS approval pending")
+    if not supplier_access(u):raise HTTPException(403,"Your free trial has ended. Activate membership to respond to CTS enquiries.")
     with conn() as c:
         r=c.execute("SELECT * FROM requirements WHERE id=%s",(d.requirement_id,)).fetchone()
         if not r:raise HTTPException(404,"Requirement not found")
         if not matches(dict(r),u):raise HTTPException(403,"Requirement is outside your matching area/category")
-        try:c.execute("INSERT INTO quotes(requirement_id,supplier_id,amount,notes,created) VALUES(%s,%s,%s,%s,%s)",(d.requirement_id,u["id"],d.amount,d.notes,int(time.time())))
+        try:
+            c.execute("INSERT INTO quotes(requirement_id,supplier_id,amount,notes,created) VALUES(%s,%s,%s,%s,%s)",(d.requirement_id,u["id"],d.amount,d.notes,int(time.time())))
+            c.execute("UPDATE requirements SET status='quotation_received' WHERE id=%s AND status IN ('new_requirement','supplier_matched')",(d.requirement_id,))
         except psycopg.IntegrityError:raise HTTPException(409,"You have already quoted for this requirement")
-    return {"ok":True}
+    return {"ok":True,"message":f"Quotation submitted through CTS for CTS-REQ-{d.requirement_id:06d}."}
 @app.get("/api/quotes/{reqid}")
 def quotes(reqid:int,request:Request):
     u=me(request)
@@ -278,7 +291,17 @@ def quotes(reqid:int,request:Request):
         if u["role"]=="supplier":
             q=c.execute("SELECT 1 FROM quotes WHERE requirement_id=%s AND supplier_id=%s",(reqid,u["id"])).fetchone()
             if not q:raise HTTPException(403,"Not your quotation")
-        return [dict(x) for x in c.execute("SELECT q.id,q.amount,q.notes,q.created,u.name supplier_name FROM quotes q JOIN users u ON u.id=q.supplier_id WHERE q.requirement_id=%s ORDER BY q.amount",(reqid,))]
+        return [dict(x) for x in c.execute("SELECT q.id,q.amount,q.notes,q.created,q.accepted,u.name supplier_name FROM quotes q JOIN users u ON u.id=q.supplier_id WHERE q.requirement_id=%s ORDER BY q.accepted DESC,q.amount",(reqid,))]
+@app.post("/api/quotes/{quoteid}/accept")
+def accept_quote(quoteid:int,request:Request):
+    u=role(request,"buyer")
+    with conn() as c:
+        q=c.execute("SELECT q.id,q.requirement_id,r.buyer_id FROM quotes q JOIN requirements r ON r.id=q.requirement_id WHERE q.id=%s",(quoteid,)).fetchone()
+        if not q:raise HTTPException(404,"Quotation not found")
+        if q["buyer_id"]!=u["id"]:raise HTTPException(403,"Not your requirement")
+        c.execute("UPDATE quotes SET accepted=CASE WHEN id=%s THEN TRUE ELSE FALSE END WHERE requirement_id=%s",(quoteid,q["requirement_id"]))
+        c.execute("UPDATE requirements SET status='order_confirmed' WHERE id=%s",(q["requirement_id"],))
+    return {"ok":True,"enquiry_no":f"CTS-REQ-{q['requirement_id']:06d}","message":f"CTS order confirmed for CTS-REQ-{q['requirement_id']:06d}."}
 @app.post("/api/ads")
 def create_ad(d:Ad,request:Request):
     u=role(request,"supplier")
