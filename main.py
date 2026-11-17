@@ -308,7 +308,19 @@ def payment_verify(d:PaymentVerify,request:Request):
 def admin(request:Request):
     role(request,"admin")
     with conn() as c:
-        return {"users":[dict(x) for x in c.execute("SELECT id,name,email,phone,role,city,district,category,approved FROM users ORDER BY id DESC LIMIT 300")],"ads":[dict(x) for x in c.execute("SELECT a.id,a.headline,a.target_city,a.approved,u.name supplier_name FROM ads a JOIN users u ON u.id=a.supplier_id ORDER BY a.id DESC LIMIT 300")],"counts":{k:c.execute("SELECT COUNT(*) AS count FROM "+table).fetchone()["count"] for k,table in [("users","users"),("requirements","requirements"),("quotes","quotes"),("ads","ads")]}}
+        return {
+            "users":[dict(x) for x in c.execute("""
+                SELECT id,name,email,phone,whatsapp,role,country,state_region,city,
+                       district,postal_code,company_type,products_services,
+                       target_markets,category,service_areas,approved,
+                       membership_until,created
+                FROM users
+                ORDER BY id DESC
+                LIMIT 1000
+            """)],
+            "ads":[dict(x) for x in c.execute("SELECT a.id,a.headline,a.target_city,a.approved,u.name supplier_name FROM ads a JOIN users u ON u.id=a.supplier_id ORDER BY a.id DESC LIMIT 300")],
+            "counts":{k:c.execute("SELECT COUNT(*) AS count FROM "+table).fetchone()["count"] for k,table in [("users","users"),("requirements","requirements"),("quotes","quotes"),("ads","ads")]}
+        }
 @app.post("/api/admin/approve/{kind}/{itemid}")
 def approve(kind:str,itemid:int,request:Request):
     role(request,"admin")
