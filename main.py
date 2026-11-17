@@ -95,12 +95,16 @@ class QuickRegister(BaseModel):
 class Login(BaseModel):
     email:str;password:str
 class Requirement(BaseModel):
-    category:str;product:str=Field(min_length=3,max_length=160);quantity:str=Field(min_length=1,max_length=80);city:str=Field(min_length=2,max_length=90);district:str=Field(min_length=2,max_length=90);pin:str=Field(default="",max_length=6);details:str=Field(default="",max_length=1200)
+    category:str;product:str=Field(min_length=3,max_length=160);quantity:str=Field(min_length=1,max_length=80);city:str=Field(min_length=2,max_length=90);district:str=Field(min_length=2,max_length=90);pin:str=Field(default="",max_length=6);details:str=Field(default="",max_length=1200);target_supplier_id:int|None=None
 class GuestRequirement(Requirement):
     name:str=Field(min_length=2,max_length=100)
     phone:str=Field(min_length=7,max_length=20)
 class Quote(BaseModel):
     requirement_id:int;amount:float=Field(gt=0,le=10000000000);notes:str=Field(default="",max_length=600)
+class Review(BaseModel):
+    requirement_id:int
+    rating:int=Field(ge=1,le=5)
+    comment:str=Field(min_length=2,max_length=800)
 class Ad(BaseModel):
     image_base64:str=Field(default="",max_length=2800000)
     image_type:str=Field(default="",max_length=30)
@@ -133,7 +137,7 @@ def role(request,r):
     if u["role"]!=r:raise HTTPException(403,"This action requires "+r+" access")
     return u
 def publicuser(u):
-    fields=["id","name","role","country","state_region","city","district","postal_code","category","service_areas","website","company_type","products_services","target_markets","approved"]
+    fields=["id","name","role","country","state_region","city","district","postal_code","category","service_areas","website","company_type","products_services","target_markets","approved","review_rating","review_count"]
     out={k:u[k] for k in fields}
     if u.get("public_contact"):
         out["phone"]=u.get("phone","")
@@ -213,7 +217,7 @@ def logout(request:Request):request.session.clear();return {"ok":True}
 def who(request:Request):return me(request)
 @app.get("/api/suppliers")
 def suppliers(category:str="",city:str="",country:str="",division:str=""):
-    with conn() as c:rows=[dict(r) for r in c.execute("SELECT id,name,role,phone,country,state_region,city,district,postal_code,category,service_areas,whatsapp,website,company_type,products_services,target_markets,public_contact,approved FROM users WHERE role='supplier' AND approved=1 ORDER BY id DESC LIMIT 300")]
+    with conn() as c:rows=[dict(r) for r in c.execute("SELECT u.id,u.name,u.role,u.phone,u.country,u.state_region,u.city,u.district,u.postal_code,u.category,u.service_areas,u.whatsapp,u.website,u.company_type,u.products_services,u.target_markets,u.public_contact,u.approved,COALESCE(ROUND(AVG(rv.rating)::numeric,1),0) review_rating,COUNT(rv.id) review_count FROM users u LEFT JOIN reviews rv ON rv.supplier_id=u.id WHERE u.role='supplier' AND u.approved=1 GROUP BY u.id ORDER BY u.id DESC LIMIT 300")]
     allowed=MACHINERY_CATS if division=="machinery" else MATERIAL_CATS if division=="materials" else None
     return [publicuser(r) for r in rows if (not category or r["category"]==category) and (allowed is None or r["category"] in allowed) and (not country or r["country"].casefold()==country.casefold()) and (not city or city.casefold() in " ".join([r["city"],r["district"],r["state_region"],r["country"],r["service_areas"]]).casefold())]
 @app.get("/api/public-listings")
@@ -238,7 +242,11 @@ def post_requirement(d:Requirement,request:Request):
     u=role(request,"buyer")
     if d.category not in CATS:raise HTTPException(400,"Invalid category")
     with conn() as c:
-        cur=c.execute("INSERT INTO requirements(buyer_id,category,product,quantity,city,district,pin,details,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",(u["id"],d.category,d.product,d.quantity,d.city,d.district,d.pin,d.details,int(time.time())))
+        if d.target_supplier_id:
+            supplier=c.execute("SELECT id,category FROM users WHERE id=%s AND role='supplier' AND approved=1",(d.target_supplier_id,)).fetchone()
+            if not supplier:raise HTTPException(404,"Selected supplier is not available")
+            if supplier["category"]!=d.category:raise HTTPException(400,"Requirement category must match the selected supplier")
+        cur=c.execute("INSERT INTO requirements(buyer_id,category,product,quantity,city,district,pin,details,target_supplier_id,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",(u["id"],d.category,d.product,d.quantity,d.city,d.district,d.pin,d.details,d.target_supplier_id,int(time.time())))
         itemid=cur.fetchone()["id"]
         return {"ok":True,"id":itemid,"enquiry_no":f"CTS-REQ-{itemid:06d}","message":f"Requirement registered as CTS-REQ-{itemid:06d}."}
 @app.post("/api/requirements/guest")
@@ -255,7 +263,11 @@ def post_guest_requirement(d:GuestRequirement):
         else:
             cur=c.execute("INSERT INTO users(email,phone,name,role,password_hash,country,state_region,city,district,postal_code,pin,whatsapp,website,company_type,products_services,target_markets,public_contact,category,service_areas,approved,created) VALUES(%s,%s,%s,'buyer',%s,'India','',%s,%s,%s,%s,%s,'','','','','','','',1,%s) RETURNING id",(guest_email,phone,d.name.strip(),pwdhash(secrets.token_urlsafe(24)),d.city.strip(),d.district.strip(),d.pin.strip(),d.pin.strip(),phone,now))
             buyer_id=cur.fetchone()["id"]
-        cur=c.execute("INSERT INTO requirements(buyer_id,category,product,quantity,city,district,pin,details,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",(buyer_id,d.category,d.product,d.quantity,d.city,d.district,d.pin,"Voice/guest submission — "+d.details,now))
+        if d.target_supplier_id:
+            supplier=c.execute("SELECT id,category FROM users WHERE id=%s AND role='supplier' AND approved=1",(d.target_supplier_id,)).fetchone()
+            if not supplier:raise HTTPException(404,"Selected supplier is not available")
+            if supplier["category"]!=d.category:raise HTTPException(400,"Requirement category must match the selected supplier")
+        cur=c.execute("INSERT INTO requirements(buyer_id,category,product,quantity,city,district,pin,details,target_supplier_id,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",(buyer_id,d.category,d.product,d.quantity,d.city,d.district,d.pin,"Voice/guest submission — "+d.details,d.target_supplier_id,now))
         itemid=cur.fetchone()["id"]
     return {"ok":True,"id":itemid,"enquiry_no":f"CTS-REQ-{itemid:06d}","message":f"Requirement registered as CTS-REQ-{itemid:06d} through CTS ConstructConnect."}
 @app.get("/api/requirements")
@@ -266,7 +278,7 @@ def requirements(request:Request):
     if u["role"]=="buyer":return [requirement_out(r) for r in rs if r["buyer_id"]==u["id"]]
     if u["role"]=="supplier":
         if not supplier_access(u):return []
-        return [requirement_out(r) for r in rs if matches(r,u)]
+        return [requirement_out(r) for r in rs if (r.get("target_supplier_id")==u["id"] or (not r.get("target_supplier_id") and matches(r,u)))]
     return [requirement_out(r) for r in rs]
 @app.post("/api/quotes")
 def post_quote(d:Quote,request:Request):
@@ -275,7 +287,8 @@ def post_quote(d:Quote,request:Request):
     with conn() as c:
         r=c.execute("SELECT * FROM requirements WHERE id=%s",(d.requirement_id,)).fetchone()
         if not r:raise HTTPException(404,"Requirement not found")
-        if not matches(dict(r),u):raise HTTPException(403,"Requirement is outside your matching area/category")
+        if r.get("target_supplier_id") and r["target_supplier_id"]!=u["id"]:raise HTTPException(403,"This enquiry was sent directly to another supplier")
+        if not r.get("target_supplier_id") and not matches(dict(r),u):raise HTTPException(403,"Requirement is outside your matching area/category")
         try:
             c.execute("INSERT INTO quotes(requirement_id,supplier_id,amount,notes,created) VALUES(%s,%s,%s,%s,%s)",(d.requirement_id,u["id"],d.amount,d.notes,int(time.time())))
             c.execute("UPDATE requirements SET status='quotation_received' WHERE id=%s AND status IN ('new_requirement','supplier_matched')",(d.requirement_id,))
@@ -291,7 +304,7 @@ def quotes(reqid:int,request:Request):
         if u["role"]=="supplier":
             q=c.execute("SELECT 1 FROM quotes WHERE requirement_id=%s AND supplier_id=%s",(reqid,u["id"])).fetchone()
             if not q:raise HTTPException(403,"Not your quotation")
-        return [dict(x) for x in c.execute("SELECT q.id,q.amount,q.notes,q.created,q.accepted,u.name supplier_name FROM quotes q JOIN users u ON u.id=q.supplier_id WHERE q.requirement_id=%s ORDER BY q.accepted DESC,q.amount",(reqid,))]
+        return [dict(x) for x in c.execute("SELECT q.id,q.supplier_id,q.amount,q.notes,q.created,q.accepted,u.name supplier_name FROM quotes q JOIN users u ON u.id=q.supplier_id WHERE q.requirement_id=%s ORDER BY q.accepted DESC,q.amount",(reqid,))]
 @app.post("/api/quotes/{quoteid}/accept")
 def accept_quote(quoteid:int,request:Request):
     u=role(request,"buyer")
@@ -302,6 +315,19 @@ def accept_quote(quoteid:int,request:Request):
         c.execute("UPDATE quotes SET accepted=CASE WHEN id=%s THEN TRUE ELSE FALSE END WHERE requirement_id=%s",(quoteid,q["requirement_id"]))
         c.execute("UPDATE requirements SET status='order_confirmed' WHERE id=%s",(q["requirement_id"],))
     return {"ok":True,"enquiry_no":f"CTS-REQ-{q['requirement_id']:06d}","message":f"CTS order confirmed for CTS-REQ-{q['requirement_id']:06d}."}
+@app.post("/api/reviews")
+def create_review(d:Review,request:Request):
+    u=role(request,"buyer")
+    with conn() as c:
+        order=c.execute("SELECT q.supplier_id FROM requirements r JOIN quotes q ON q.requirement_id=r.id AND q.accepted=TRUE WHERE r.id=%s AND r.buyer_id=%s AND r.status='order_confirmed'",(d.requirement_id,u["id"])).fetchone()
+        if not order:raise HTTPException(403,"A review can be given only after confirming a supplier quotation")
+        try:c.execute("INSERT INTO reviews(requirement_id,buyer_id,supplier_id,rating,comment,created) VALUES(%s,%s,%s,%s,%s,%s)",(d.requirement_id,u["id"],order["supplier_id"],d.rating,d.comment.strip(),int(time.time())))
+        except psycopg.IntegrityError:raise HTTPException(409,"You have already reviewed this order")
+    return {"ok":True,"message":"Thank you. Your supplier review is now visible."}
+@app.get("/api/suppliers/{supplier_id}/reviews")
+def supplier_reviews(supplier_id:int):
+    with conn() as c:
+        return [dict(x) for x in c.execute("SELECT rv.rating,rv.comment,rv.created,u.name buyer_name FROM reviews rv JOIN users u ON u.id=rv.buyer_id WHERE rv.supplier_id=%s ORDER BY rv.id DESC LIMIT 50",(supplier_id,))]
 @app.post("/api/ads")
 def create_ad(d:Ad,request:Request):
     u=role(request,"supplier")
