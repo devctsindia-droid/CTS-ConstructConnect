@@ -45,6 +45,27 @@ def checkpwd(p,h):
     except:return False
 def init():
     with conn() as c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS public_listings (
+                id BIGSERIAL PRIMARY KEY,
+                name VARCHAR(180) NOT NULL,
+                phone VARCHAR(30) NOT NULL DEFAULT '',
+                category VARCHAR(80) NOT NULL,
+                country VARCHAR(90) NOT NULL DEFAULT 'India',
+                state_region VARCHAR(100) NOT NULL DEFAULT '',
+                city VARCHAR(90) NOT NULL,
+                district VARCHAR(90) NOT NULL DEFAULT '',
+                website VARCHAR(300) NOT NULL DEFAULT '',
+                products_services VARCHAR(1000) NOT NULL DEFAULT '',
+                source_name VARCHAR(120) NOT NULL,
+                source_url VARCHAR(600) NOT NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'unclaimed'
+                    CHECK (status IN ('unclaimed','claimed','verified')),
+                created BIGINT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS public_listings_location_idx ON public_listings(country,state_region,city,district)")
+        c.execute("CREATE INDEX IF NOT EXISTS public_listings_category_idx ON public_listings(category)")
         email=os.environ.get("CTS_ADMIN_EMAIL","").strip().lower()
         password=os.environ.get("CTS_ADMIN_PASSWORD","")
         if email and password and len(password)>=12 and not c.execute("SELECT 1 FROM users WHERE email=%s",(email,)).fetchone():
@@ -108,6 +129,18 @@ class PaymentVerify(BaseModel):
     razorpay_order_id:str
     razorpay_payment_id:str
     razorpay_signature:str
+class PublicListingIn(BaseModel):
+    name:str=Field(min_length=2,max_length=180)
+    phone:str=Field(default="",max_length=30)
+    category:str=Field(min_length=2,max_length=80)
+    country:str=Field(default="India",min_length=2,max_length=90)
+    state_region:str=Field(default="",max_length=100)
+    city:str=Field(min_length=2,max_length=90)
+    district:str=Field(default="",max_length=90)
+    website:str=Field(default="",max_length=300)
+    products_services:str=Field(default="",max_length=1000)
+    source_name:str=Field(min_length=2,max_length=120)
+    source_url:str=Field(min_length=8,max_length=600)
 def me(request):
     uid=request.session.get("uid")
     if not uid:raise HTTPException(401,"Please log in")
@@ -194,6 +227,23 @@ def suppliers(category:str="",city:str="",country:str="",division:str=""):
     with conn() as c:rows=[dict(r) for r in c.execute("SELECT id,name,role,phone,country,state_region,city,district,postal_code,category,service_areas,whatsapp,website,company_type,products_services,target_markets,public_contact,approved FROM users WHERE role='supplier' AND approved=1 ORDER BY id DESC LIMIT 300")]
     allowed=MACHINERY_CATS if division=="machinery" else MATERIAL_CATS if division=="materials" else None
     return [publicuser(r) for r in rows if (not category or r["category"]==category) and (allowed is None or r["category"] in allowed) and (not country or r["country"].casefold()==country.casefold()) and (not city or city.casefold() in " ".join([r["city"],r["district"],r["state_region"],r["country"],r["service_areas"]]).casefold())]
+@app.get("/api/public-listings")
+def public_listings(category:str="",city:str="",country:str="",division:str=""):
+    allowed=MACHINERY_CATS if division=="machinery" else MATERIAL_CATS if division=="materials" else None
+    where=[];params=[]
+    if category:
+        where.append("category=%s");params.append(category)
+    elif allowed:
+        where.append("category=ANY(%s)");params.append(list(allowed))
+    if country:
+        where.append("country ILIKE %s");params.append(country)
+    if city:
+        where.append("CONCAT_WS(' ',city,district,state_region,country) ILIKE %s");params.append("%"+city+"%")
+    clause=" WHERE "+" AND ".join(where) if where else ""
+    with conn() as c:
+        total=c.execute("SELECT COUNT(*) AS count FROM public_listings"+clause,params).fetchone()["count"]
+        items=[dict(x) for x in c.execute("SELECT id,name,phone,category,country,state_region,city,district,website,products_services,source_name,source_url,status FROM public_listings"+clause+" ORDER BY id DESC LIMIT 300",params)]
+    return {"total":total,"items":items}
 @app.post("/api/requirements")
 def post_requirement(d:Requirement,request:Request):
     u=role(request,"buyer")
@@ -319,8 +369,22 @@ def admin(request:Request):
                 LIMIT 1000
             """)],
             "ads":[dict(x) for x in c.execute("SELECT a.id,a.headline,a.target_city,a.approved,u.name supplier_name FROM ads a JOIN users u ON u.id=a.supplier_id ORDER BY a.id DESC LIMIT 300")],
-            "counts":{k:c.execute("SELECT COUNT(*) AS count FROM "+table).fetchone()["count"] for k,table in [("users","users"),("requirements","requirements"),("quotes","quotes"),("ads","ads")]}
+            "counts":{k:c.execute("SELECT COUNT(*) AS count FROM "+table).fetchone()["count"] for k,table in [("users","users"),("public listings","public_listings"),("requirements","requirements"),("quotes","quotes"),("ads","ads")]}
         }
+@app.post("/api/admin/public-listings")
+def create_public_listing(d:PublicListingIn,request:Request):
+    role(request,"admin")
+    if d.category not in CATS:raise HTTPException(400,"Select a valid category")
+    source=d.source_url.strip()
+    if not source.lower().startswith(("http://","https://")):raise HTTPException(400,"Enter the public source URL")
+    website=d.website.strip()
+    if website and not website.lower().startswith(("http://","https://")):website="https://"+website
+    phone="".join(ch for ch in d.phone if ch.isdigit() or ch=='+')
+    with conn() as c:
+        duplicate=c.execute("SELECT id FROM public_listings WHERE LOWER(name)=LOWER(%s) AND LOWER(city)=LOWER(%s) AND phone=%s",(d.name.strip(),d.city.strip(),phone)).fetchone()
+        if duplicate:raise HTTPException(409,"This public business listing already exists")
+        item=c.execute("INSERT INTO public_listings(name,phone,category,country,state_region,city,district,website,products_services,source_name,source_url,status,created) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'unclaimed',%s) RETURNING id",(d.name.strip(),phone,d.category,d.country.strip(),d.state_region.strip(),d.city.strip(),d.district.strip(),website,d.products_services.strip(),d.source_name.strip(),source,int(time.time()))).fetchone()
+    return {"ok":True,"id":item["id"],"message":"Public business listing added as unclaimed"}
 @app.post("/api/admin/approve/{kind}/{itemid}")
 def approve(kind:str,itemid:int,request:Request):
     role(request,"admin")
