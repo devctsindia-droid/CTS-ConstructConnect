@@ -45,27 +45,6 @@ def checkpwd(p,h):
     except:return False
 def init():
     with conn() as c:
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS public_listings (
-                id BIGSERIAL PRIMARY KEY,
-                name VARCHAR(180) NOT NULL,
-                phone VARCHAR(30) NOT NULL DEFAULT '',
-                category VARCHAR(80) NOT NULL,
-                country VARCHAR(90) NOT NULL DEFAULT 'India',
-                state_region VARCHAR(100) NOT NULL DEFAULT '',
-                city VARCHAR(90) NOT NULL,
-                district VARCHAR(90) NOT NULL DEFAULT '',
-                website VARCHAR(300) NOT NULL DEFAULT '',
-                products_services VARCHAR(1000) NOT NULL DEFAULT '',
-                source_name VARCHAR(120) NOT NULL,
-                source_url VARCHAR(600) NOT NULL,
-                status VARCHAR(20) NOT NULL DEFAULT 'unclaimed'
-                    CHECK (status IN ('unclaimed','claimed','verified')),
-                created BIGINT NOT NULL
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS public_listings_location_idx ON public_listings(country,state_region,city,district)")
-        c.execute("CREATE INDEX IF NOT EXISTS public_listings_category_idx ON public_listings(category)")
         email=os.environ.get("CTS_ADMIN_EMAIL","").strip().lower()
         password=os.environ.get("CTS_ADMIN_PASSWORD","")
         if email and password and len(password)>=12 and not c.execute("SELECT 1 FROM users WHERE email=%s",(email,)).fetchone():
