@@ -330,7 +330,8 @@ def supplier_reviews(supplier_id:int):
         return [dict(x) for x in c.execute("SELECT rv.rating,rv.comment,rv.created,u.name buyer_name FROM reviews rv JOIN users u ON u.id=rv.buyer_id WHERE rv.supplier_id=%s ORDER BY rv.id DESC LIMIT 50",(supplier_id,))]
 @app.post("/api/ads")
 def create_ad(d:Ad,request:Request):
-    u=role(request,"supplier")
+    u=me(request)
+    if u["role"] not in ("supplier","admin"):raise HTTPException(403,"This action requires supplier or CTS admin access")
     if d.category not in CATS:raise HTTPException(400,"Invalid category")
     image=None
     if d.image_base64:
@@ -338,7 +339,12 @@ def create_ad(d:Ad,request:Request):
         except Exception:raise HTTPException(400,"Invalid picture")
         if len(image)>2*1024*1024:raise HTTPException(400,"Picture must be under 2 MB")
         if not ((d.image_type=="image/jpeg" and image[:3]==bytes([255,216,255])) or (d.image_type=="image/png" and image[:8]==bytes([137,80,78,71,13,10,26,10]))):raise HTTPException(400,"Use JPG or PNG")
-    with conn() as c:c.execute("INSERT INTO ads(supplier_id,headline,category,target_city,target_district,created,image_data,image_type) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",(u["id"],d.headline,d.category,d.target_city,d.target_district,int(time.time()),image,d.image_type if image else None))
+    supplier_id=u["id"]
+    if u["role"]=="admin":
+        with conn() as c:
+            supplier=c.execute("SELECT id FROM users WHERE role='supplier' AND (LOWER(name) LIKE %s OR LOWER(email)=%s) ORDER BY id LIMIT 1",("%construction therapy%","constructiontherapysolutions@gmail.com")).fetchone()
+        if supplier:supplier_id=supplier["id"]
+    with conn() as c:c.execute("INSERT INTO ads(supplier_id,headline,category,target_city,target_district,created,image_data,image_type) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",(supplier_id,d.headline,d.category,d.target_city,d.target_district,int(time.time()),image,d.image_type if image else None))
     return {"ok":True,"message":"Advertisement submitted for CTS approval"}
 @app.get("/api/ads")
 def ads(city:str=""):
