@@ -24,6 +24,7 @@ app.mount("/static",StaticFiles(directory=BASE/"static"),name="static")
 CATS=["Cement","Steel & TMT","Hardware & Tools","M-Sand & Aggregates","Ready-Mix Concrete","Bricks & Blocks","Electrical","Plumbing & Sanitary","Paints & Chemicals","Tiles & Flooring","Construction Equipment","Crusher & Plant Spares","Equipment Rental","Contractors & Services","Manpower","Transport & Logistics","Real Estate","Tenders & Projects","Industrial Supplies","Safety Equipment"]
 MATERIAL_CATS={"Cement","Steel & TMT","Hardware & Tools","M-Sand & Aggregates","Ready-Mix Concrete","Bricks & Blocks","Electrical","Plumbing & Sanitary","Paints & Chemicals","Tiles & Flooring","Industrial Supplies","Safety Equipment"}
 MACHINERY_CATS={"Construction Equipment","Crusher & Plant Spares","Equipment Rental"}
+REAL_ESTATE_CATS={"Real Estate"}
 @contextmanager
 def conn():
     if not DATABASE_URL:
@@ -218,11 +219,11 @@ def who(request:Request):return me(request)
 @app.get("/api/suppliers")
 def suppliers(category:str="",city:str="",country:str="",division:str=""):
     with conn() as c:rows=[dict(r) for r in c.execute("SELECT u.id,u.name,u.role,u.phone,u.country,u.state_region,u.city,u.district,u.postal_code,u.category,u.service_areas,u.whatsapp,u.website,u.company_type,u.products_services,u.target_markets,u.public_contact,u.approved,COALESCE(ROUND(AVG(rv.rating)::numeric,1),0) review_rating,COUNT(rv.id) review_count FROM users u LEFT JOIN reviews rv ON rv.supplier_id=u.id WHERE u.role='supplier' AND u.approved=1 GROUP BY u.id ORDER BY u.id DESC LIMIT 300")]
-    allowed=MACHINERY_CATS if division=="machinery" else MATERIAL_CATS if division=="materials" else None
+    allowed=MACHINERY_CATS if division=="machinery" else MATERIAL_CATS if division=="materials" else REAL_ESTATE_CATS if division=="realestate" else None
     return [publicuser(r) for r in rows if (not category or r["category"]==category) and (allowed is None or r["category"] in allowed) and (not country or r["country"].casefold()==country.casefold()) and (not city or city.casefold() in " ".join([r["city"],r["district"],r["state_region"],r["country"],r["service_areas"]]).casefold())]
 @app.get("/api/public-listings")
 def public_listings(category:str="",city:str="",country:str="",division:str=""):
-    allowed=MACHINERY_CATS if division=="machinery" else MATERIAL_CATS if division=="materials" else None
+    allowed=MACHINERY_CATS if division=="machinery" else MATERIAL_CATS if division=="materials" else REAL_ESTATE_CATS if division=="realestate" else None
     where=[];params=[]
     if category:
         where.append("category=%s");params.append(category)
