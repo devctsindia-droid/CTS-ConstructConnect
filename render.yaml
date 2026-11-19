@@ -2,12 +2,12 @@ services:
   - type: web
     name: cts-constructconnect
     runtime: docker
-    plan: free
+    plan: 0.5c-512mb
     region: singapore
     dockerfilePath: ./Dockerfile
     dockerContext: .
     autoDeployTrigger: commit
-    healthCheckPath: /
+    healthCheckPath: /health
     envVars:
       - key: CTS_SECRET
         generateValue: true
