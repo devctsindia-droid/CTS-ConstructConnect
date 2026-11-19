@@ -156,6 +156,9 @@ def requirement_out(row):
     out["enquiry_no"]=f"CTS-REQ-{out['id']:06d}"
     out["source_label"]="Through CTS ConstructConnect"
     return out
+@app.get("/health")
+def health():return {"ok":True}
+
 @app.get("/")
 def index():return FileResponse(BASE/"static"/"index.html",headers={"Cache-Control":"no-cache, no-store, must-revalidate"})
 @app.get("/manifest.webmanifest")
