@@ -5,7 +5,7 @@ import psycopg
 from psycopg.rows import dict_row
 from contextlib import contextmanager
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response, UploadFile, File, Form
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -195,6 +195,52 @@ def quick_register(d:QuickRegister):
         "employer":"Hiring requirement registered. CTS will contact you to collect the vacancy details."
     }
     return {"ok":True,"id":member_id,"message":messages[d.role]}
+
+@app.post("/api/job-seeker-register")
+async def job_seeker_register(
+    name:str=Form(...),
+    phone:str=Form(...),
+    city:str=Form(...),
+    category:str=Form(...),
+    resume:UploadFile=File(...)
+):
+    name=name.strip();city=city.strip();category=category.strip()
+    if len(name)<2 or len(name)>100: raise HTTPException(400,"Enter your full name")
+    if len(city)<2 or len(city)>90: raise HTTPException(400,"Enter your city")
+    if category not in JOB_ROLES: raise HTTPException(400,"Choose a job role")
+    clean_phone="".join(ch for ch in phone if ch.isdigit())
+    if len(clean_phone)<7 or len(clean_phone)>15: raise HTTPException(400,"Enter a valid WhatsApp/mobile number")
+    filename=(resume.filename or "").strip()
+    ext=Path(filename).suffix.lower()
+    allowed_exts={".pdf",".doc",".docx"}
+    allowed_types={"application/pdf","application/msword","application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+    if ext not in allowed_exts or resume.content_type not in allowed_types:
+        raise HTTPException(400,"Upload résumé as PDF, DOC or DOCX")
+    data=await resume.read(2097153)
+    if not data: raise HTTPException(400,"The résumé file is empty")
+    if len(data)>2097152: raise HTTPException(400,"Résumé must be 2 MB or smaller")
+    email=f"member-{clean_phone}@phone.cts.invalid"
+    now=int(time.time())
+    with conn() as c:
+        existing=c.execute("SELECT id,role FROM users WHERE phone=%s OR email=%s ORDER BY id LIMIT 1",(clean_phone,email)).fetchone()
+        if existing and existing["role"]!="job_seeker":
+            raise HTTPException(409,"This mobile number is already registered in another category. Please contact CTS to update it.")
+        if existing:
+            member_id=existing["id"]
+            c.execute("UPDATE users SET name=%s,city=%s,category=%s,approved=1 WHERE id=%s",(name,city,category,member_id))
+        else:
+            member_id=c.execute("INSERT INTO users(email,phone,name,role,password_hash,country,state_region,city,district,postal_code,pin,whatsapp,website,company_type,products_services,target_markets,public_contact,category,service_areas,approved,membership_until,created) VALUES(%s,%s,%s,'job_seeker',%s,'India','',%s,'','','',%s,'','','','','',FALSE,%s,'',1,0,%s) RETURNING id",(email,clean_phone,name,pwdhash(secrets.token_urlsafe(24)),city,clean_phone,category,now)).fetchone()["id"]
+        c.execute("INSERT INTO job_resumes(user_id,filename,content_type,file_data,file_size,created) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(user_id) DO UPDATE SET filename=EXCLUDED.filename,content_type=EXCLUDED.content_type,file_data=EXCLUDED.file_data,file_size=EXCLUDED.file_size,created=EXCLUDED.created",(member_id,filename,resume.content_type,data,len(data),now))
+    return {"ok":True,"id":member_id,"message":"Job-seeker registration and résumé upload completed. CTS will contact you for suitable opportunities."}
+
+@app.get("/api/admin/resumes/{user_id}")
+def admin_resume(user_id:int,request:Request):
+    role(request,"admin")
+    with conn() as c:
+        item=c.execute("SELECT filename,content_type,file_data FROM job_resumes WHERE user_id=%s",(user_id,)).fetchone()
+    if not item: raise HTTPException(404,"Résumé not found")
+    safe_name="".join(ch for ch in item["filename"] if ch.isalnum() or ch in "._- ")[:120] or "resume"
+    return Response(bytes(item["file_data"]),media_type=item["content_type"],headers={"Content-Disposition":f'attachment; filename="{safe_name}"',"X-Content-Type-Options":"nosniff","Cache-Control":"private, no-store"})
 
 @app.post("/api/register")
 def register(d:Register):
@@ -408,7 +454,8 @@ def admin(request:Request):
                 SELECT id,name,email,phone,whatsapp,role,country,state_region,city,
                        district,postal_code,company_type,products_services,
                        target_markets,category,service_areas,approved,
-                       membership_until,created
+                       membership_until,created,
+                       EXISTS(SELECT 1 FROM job_resumes jr WHERE jr.user_id=users.id) AS has_resume
                 FROM users
                 ORDER BY id DESC
                 LIMIT 1000
@@ -456,18 +503,19 @@ def quick_join_page():
     options="".join(f'<option value="{x}">{x}</option>' for x in CATS)
     job_options="".join(f'<option value="{x}">{x}</option>' for x in JOB_ROLES)
     return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Free CTS Registration</title><style>
-body{{margin:0;background:#071827;color:#fff;font-family:Arial,sans-serif}}main{{max-width:520px;margin:auto;padding:24px}}.card{{background:#fff;color:#13202b;border-radius:22px;padding:22px;box-shadow:0 18px 55px #0008}}h1{{margin:0 0 8px;color:#ef6c00}}p{{line-height:1.45}}label{{display:block;font-weight:700;margin-top:14px}}input,select,button{{box-sizing:border-box;width:100%;padding:14px;margin-top:6px;border:1px solid #b8c2cc;border-radius:12px;font-size:16px}}button{{background:#ef6c00;color:white;border:0;font-weight:800;margin-top:20px}}.small{{font-size:13px;color:#56616b}}#msg{{font-weight:800;margin-top:16px}}.brand{{text-align:center;margin-bottom:18px}}.free{{display:inline-block;background:#daf5e4;color:#17653a;padding:7px 12px;border-radius:999px;font-weight:800}}</style></head><body><main><div class="brand"><h2>CTS ConstructConnect</h2><span class="free">100% FREE REGISTRATION</span></div><div class="card"><h1>Join in 60 seconds</h1><p>ನಿಮ್ಮ ಭಾಷೆಯಲ್ಲಿ ಮಾತನಾಡಬಹುದು · अपनी भाषा में बोल सकते हैं<br>Buyers, suppliers, job seekers and employers across the construction industry.</p><form id="f"><label>Name / Company</label><input name="name" required minlength="2"><label>WhatsApp / Mobile</label><input name="phone" required inputmode="tel"><label>I am a</label><select name="role" id="role"><option value="supplier">Supplier / Service Provider</option><option value="buyer">Buyer / Contractor</option><option value="job_seeker">Looking for Job</option><option value="employer">Post a Job / Hiring</option></select><label>City</label><input name="city" required><div id="catwrap"><label id="catlabel">Category</label><select name="category" id="category"><option value="">Select category</option>{options}</select></div><button>REGISTER FREE</button></form><div id="msg"></div><p class="small">No payment. No password needed. CTS will call to complete your profile. Help: +91 9880137241</p></div></main><script>
-const f=document.getElementById('f'),role=document.getElementById('role'),cw=document.getElementById('catwrap'),cat=document.getElementById('category'),catlabel=document.getElementById('catlabel'),msg=document.getElementById('msg');
+body{{margin:0;background:#071827;color:#fff;font-family:Arial,sans-serif}}main{{max-width:520px;margin:auto;padding:24px}}.card{{background:#fff;color:#13202b;border-radius:22px;padding:22px;box-shadow:0 18px 55px #0008}}h1{{margin:0 0 8px;color:#ef6c00}}p{{line-height:1.45}}label{{display:block;font-weight:700;margin-top:14px}}input,select,button{{box-sizing:border-box;width:100%;padding:14px;margin-top:6px;border:1px solid #b8c2cc;border-radius:12px;font-size:16px}}button{{background:#ef6c00;color:white;border:0;font-weight:800;margin-top:20px}}.small{{font-size:13px;color:#56616b}}#msg{{font-weight:800;margin-top:16px}}.brand{{text-align:center;margin-bottom:18px}}.free{{display:inline-block;background:#daf5e4;color:#17653a;padding:7px 12px;border-radius:999px;font-weight:800}}</style></head><body><main><div class="brand"><h2>CTS ConstructConnect</h2><span class="free">100% FREE REGISTRATION</span></div><div class="card"><h1>Join in 60 seconds</h1><p>ನಿಮ್ಮ ಭಾಷೆಯಲ್ಲಿ ಮಾತನಾಡಬಹುದು · अपनी भाषा में बोल सकते हैं<br>Buyers, suppliers, job seekers and employers across the construction industry.</p><form id="f"><label>Name / Company</label><input name="name" required minlength="2"><label>WhatsApp / Mobile</label><input name="phone" required inputmode="tel"><label>I am a</label><select name="role" id="role"><option value="supplier">Supplier / Service Provider</option><option value="buyer">Buyer / Contractor</option><option value="job_seeker">Looking for Job</option><option value="employer">Post a Job / Hiring</option></select><label>City</label><input name="city" required><div id="catwrap"><label id="catlabel">Category</label><select name="category" id="category"><option value="">Select category</option>{options}</select></div><div id="resumewrap" style="display:none"><label>Upload Résumé (PDF, DOC or DOCX — max 2 MB)</label><input type="file" name="resume" id="resume" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></div><button>REGISTER FREE</button></form><div id="msg"></div><p class="small">No payment. No password needed. CTS will call to complete your profile. Help: +91 9880137241</p></div></main><script>
+const f=document.getElementById('f'),role=document.getElementById('role'),cw=document.getElementById('catwrap'),cat=document.getElementById('category'),catlabel=document.getElementById('catlabel'),rw=document.getElementById('resumewrap'),resume=document.getElementById('resume'),msg=document.getElementById('msg');
 const supplierOptions=`<option value="">Select category</option>{options}`;
 const jobOptions=`<option value="">Select job role</option>{job_options}`;
 function updateRoleFields(){{
+  rw.style.display=role.value==='job_seeker'?'block':'none';resume.required=role.value==='job_seeker';
   if(role.value==='buyer'){{cw.style.display='none';cat.innerHTML='<option value=""></option>';return;}}
   cw.style.display='block';
   if(role.value==='supplier'){{catlabel.textContent='Business Category';cat.innerHTML=supplierOptions;}}
   else if(role.value==='job_seeker'){{catlabel.textContent='Job Role / Profession';cat.innerHTML=jobOptions;}}
   else{{catlabel.textContent='Position You Are Hiring For';cat.innerHTML=jobOptions;}}
 }}
-role.onchange=updateRoleFields;updateRoleFields(); f.onsubmit=async e=>{{e.preventDefault();msg.textContent='Registering...';const d=Object.fromEntries(new FormData(f));try{{const r=await fetch('/api/quick-register',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(d)}});const t=await r.text();let j;try{{j=JSON.parse(t)}}catch{{throw Error('Registration service is temporarily unavailable. Please call CTS: +91 9880137241')}}if(!r.ok)throw Error(j.detail||'Please try again');msg.style.color='#147a3d';msg.textContent='✓ '+j.message;f.reset();}}catch(x){{msg.style.color='#b3261e';msg.textContent=x.message;}}}};
+role.onchange=updateRoleFields;updateRoleFields(); f.onsubmit=async e=>{{e.preventDefault();msg.textContent='Registering...';try{{let r;if(role.value==='job_seeker'){{const fd=new FormData(f);fd.delete('role');r=await fetch('/api/job-seeker-register',{{method:'POST',body:fd}});}}else{{const d=Object.fromEntries(new FormData(f));delete d.resume;r=await fetch('/api/quick-register',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(d)}});}}const t=await r.text();let j;try{{j=JSON.parse(t)}}catch{{throw Error('Registration service is temporarily unavailable. Please call CTS: +91 9880137241')}}if(!r.ok)throw Error(j.detail||'Please try again');msg.style.color='#147a3d';msg.textContent='✓ '+j.message;f.reset();updateRoleFields();}}catch(x){{msg.style.color='#b3261e';msg.textContent=x.message;}}}};
 </script></body></html>""")
 
 # Keep old bookmarks and shared front-end links working on mobile.
