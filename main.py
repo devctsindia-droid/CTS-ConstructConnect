@@ -231,7 +231,7 @@ async def job_seeker_register(
         else:
             member_id=c.execute("INSERT INTO users(email,phone,name,role,password_hash,country,state_region,city,district,postal_code,pin,whatsapp,website,company_type,products_services,target_markets,public_contact,category,service_areas,approved,membership_until,created) VALUES(%s,%s,%s,'job_seeker',%s,'India','',%s,'','','',%s,'','','','',FALSE,%s,'',1,0,%s) RETURNING id",(email,clean_phone,name,pwdhash(secrets.token_urlsafe(24)),city,clean_phone,category,now)).fetchone()["id"]
         c.execute("INSERT INTO job_resumes(user_id,filename,content_type,file_data,file_size,created) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(user_id) DO UPDATE SET filename=EXCLUDED.filename,content_type=EXCLUDED.content_type,file_data=EXCLUDED.file_data,file_size=EXCLUDED.file_size,created=EXCLUDED.created",(member_id,filename,resume.content_type,data,len(data),now))
-    return {"ok":True,"id":member_id,"message":"Job-seeker registration and résumé upload completed. CTS will contact you for suitable opportunities."}
+    return {"ok":True,"id":member_id,"message":"Registration and résumé upload completed. CTS will review and send your résumé to suitable companies. If genuine company matches or responses are received, CTS will notify you. The optional ₹100 verified-match access link will be offered only after real matches are recorded."}
 
 @app.get("/api/admin/resumes/{user_id}")
 def admin_resume(user_id:int,request:Request):
